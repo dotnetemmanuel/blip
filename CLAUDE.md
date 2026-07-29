@@ -13,8 +13,11 @@ consumer is a coding agent that needs to call a backend while debugging; humans 
 - `describe --compact` and `--dry-run` output are pinned by golden files under
   `internal/build/testdata` and `internal/cli/testdata`. They are contracts an agent parses.
   Regenerate deliberately with `make golden`, never to make a test pass.
-- Spec fixtures live in `testdata/`. `dotnet9-minimal.json` deliberately has operations with
-  no `operationId`, because real minimal APIs do.
+- Spec fixtures live in `testdata/`. `dotnet10-minimal.json` was captured verbatim from a
+  running .NET 10 service and is OpenAPI **3.1**; `dotnet9-minimal.json` is 3.0. Both
+  deliberately contain operations with no `operationId`, because real minimal APIs do.
+- `~/Source/GitHub/blip-sandbox` is a throwaway .NET 10 minimal API for exercising the tool
+  against something real. Four bugs came out of it that no fixture had caught.
 
 ## Invariants worth knowing before you change anything
 
@@ -31,6 +34,11 @@ consumer is a coding agent that needs to call a backend while debugging; humans 
 - **Secrets are redacted by value, not just by header name.** `internal/output.Redactor`
   replaces the literal secret wherever it appears, which is what catches it in a request body.
 - **`readonly` is not overridable.** Not by `--yes`, not by `--dry-run`.
+- **A schema type is a set, not a value.** OpenAPI 3.1, which .NET 10 emits, writes
+  `"type": ["integer", "string"]`. kin-openapi's `Types.Is()` answers false for every
+  member of a union, so never reach for it; `schemaType` resolves the union by precedence.
+- **A tag is not always a group.** .NET tags endpoints declared without `.WithTags()` with
+  the assembly name, which is also the start of `info.title`. Such a tag is discarded.
 
 ## Layout
 

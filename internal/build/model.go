@@ -19,6 +19,7 @@ const (
 	TypeNumber  = "number"
 	TypeBoolean = "boolean"
 	TypeArray   = "array"
+	TypeObject  = "object"
 )
 
 // Param is one path, query or header parameter.

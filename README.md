@@ -44,7 +44,7 @@ on amd64 and arm64 into `dist/`.
 
 ## Walkthrough
 
-Start with a service running locally. This example uses a .NET minimal API on
+Start with a service running locally. This example uses a .NET 10 minimal API on
 `https://localhost:7284`, but anything that serves an OpenAPI document works.
 
 **1. Write `.blip.toml` at your repo root and commit it.**
@@ -316,6 +316,16 @@ Point `spec_url` wherever your spec lives. With it absent, blip probes, in order
 The first two cover .NET minimal APIs, whether the spec comes from
 `Microsoft.AspNetCore.OpenApi` or Swashbuckle. A docs UI such as Scalar or Swagger UI
 renders a spec, it does not serve one; point blip at the JSON, not the page.
+
+Both OpenAPI 3.0 and 3.1 are supported. .NET 10 emits 3.1, where a schema type is a
+union: `"type": ["integer", "string"]` for a query parameter that may arrive
+string-encoded, `["null", "string"]` for a nullable one. blip binds the flag to the
+specific member, so those are an `int` flag and a `string` flag respectively.
+
+Note that `Microsoft.AspNetCore.OpenApi` serves the spec with no `ETag` and no
+`Last-Modified`, so revalidation cannot be conditional and each run refetches the
+document. blip compares the bytes it gets back, so an unchanged spec is still recognised
+as unchanged.
 
 Specs are cached under `~/.cache/blip/specs/<name>/<env>/` and revalidated with
 `If-None-Match` on each run, which costs one small conditional request. `--refresh` forces

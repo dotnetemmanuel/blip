@@ -320,12 +320,28 @@ func responseSchemas(responses *openapi3.Responses) map[string]*openapi3.SchemaR
 	return out
 }
 
+// typePrecedence decides which member of an OpenAPI 3.1 type union a flag binds
+// to. "null" is not something anyone types at a prompt, and .NET pairs every
+// numeric type with "string" so that query values may arrive string-encoded, so
+// the specific type has to win over the permissive one.
+var typePrecedence = []string{TypeArray, TypeObject, TypeInteger, TypeNumber, TypeBoolean, TypeString}
+
+// schemaType reduces a schema to the one type blip can bind a flag to. It reads
+// the type as a set rather than a single value, because 3.1 documents, which is
+// what .NET 10 emits, routinely carry unions.
 func schemaType(s *openapi3.Schema) string {
 	if s == nil || s.Type == nil {
 		return TypeString
 	}
-	for _, t := range []string{TypeArray, TypeInteger, TypeNumber, TypeBoolean, TypeString, "object"} {
-		if s.Type.Is(t) {
+
+	present := make(map[string]bool, len(s.Type.Slice()))
+	for _, t := range s.Type.Slice() {
+		if t != "null" {
+			present[t] = true
+		}
+	}
+	for _, t := range typePrecedence {
+		if present[t] {
 			return t
 		}
 	}
@@ -333,7 +349,7 @@ func schemaType(s *openapi3.Schema) string {
 }
 
 func isObject(s *openapi3.Schema) bool {
-	return s != nil && s.Type != nil && s.Type.Is("object")
+	return s != nil && s.Type != nil && schemaType(s) == TypeObject
 }
 
 // enumStrings drops a null member, which .NET emits for a nullable enum and

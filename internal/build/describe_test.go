@@ -37,7 +37,7 @@ func golden(t *testing.T, name, got string) {
 }
 
 func TestCompactLinesGolden(t *testing.T) {
-	for _, spec := range []string{"dotnet9-minimal.json", "swashbuckle.json", "no-tags.json"} {
+	for _, spec := range []string{"dotnet9-minimal.json", "dotnet10-minimal.json", "swashbuckle.json", "no-tags.json"} {
 		t.Run(spec, func(t *testing.T) {
 			api := load(t, spec)
 			got := strings.Join(api.CompactLines(), "\n") + "\n"

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/getkin/kin-openapi/openapi3"
 )
 
 func load(t *testing.T, name string) *API {
@@ -441,5 +443,116 @@ func TestNullEnumMemberIsDropped(t *testing.T) {
 	}
 	if status.Type != TypeString {
 		t.Errorf("type = %q, want an enum with no type to bind as a string", status.Type)
+	}
+}
+
+// The .NET 10 fixture is a document a real Microsoft.AspNetCore.OpenApi served,
+// captured verbatim. It is OpenAPI 3.1, where a schema type is a union.
+func TestDotnet10OpenAPI31(t *testing.T) {
+	api := load(t, "dotnet10-minimal.json")
+
+	list := find(t, api, "orders", "list")
+	byName := map[string]Param{}
+	for _, p := range list.ParamsIn(InQuery) {
+		byName[p.Name] = p
+	}
+
+	// .NET 10 emits ["integer","string"], so that a query value may arrive
+	// string-encoded. A flag still has to bind as an integer.
+	if got := byName["page"].Type; got != TypeInteger {
+		t.Errorf("page type = %q, want integer from the union", got)
+	}
+	if !byName["page"].Required {
+		t.Error("page is not required, but the spec says it is")
+	}
+	if got := byName["tag"].Type; got != TypeArray {
+		t.Errorf("tag type = %q, want array", got)
+	}
+	if got := strings.Join(byName["status"].Enum, ","); got != "Open,Shipped,Cancelled" {
+		t.Errorf("status enum = %q, want the null member dropped", got)
+	}
+}
+
+func TestDotnet10GroupsAndNames(t *testing.T) {
+	api := load(t, "dotnet10-minimal.json")
+
+	// The assembly tag must not become a group, and the endpoints declared
+	// without WithName must get derived names.
+	tests := []struct{ group, name string }{
+		{"orders", "list"},
+		{"orders", "create"},
+		{"orders", "get"},
+		{"orders", "cancel"},
+		{"orders", "bulk-create"},
+		{"orders", "delete-by-id"},
+		{"orders", "lines-get-by-id-by-line-id"},
+		{"customers", "orders-get-by-customer-id"},
+		{"healthz", "get"},
+		{"diagnostics", "boom"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.group+" "+tt.name, func(t *testing.T) {
+			find(t, api, tt.group, tt.name)
+		})
+	}
+}
+
+func TestDotnet10BodyFlatness(t *testing.T) {
+	api := load(t, "dotnet10-minimal.json")
+
+	create := find(t, api, "orders", "create")
+	if create.Body == nil || !create.Body.Flat {
+		t.Fatalf("create body = %+v, want a flat body despite the 3.1 type unions", create.Body)
+	}
+	byName := map[string]Field{}
+	for _, f := range create.Body.Fields {
+		byName[f.Name] = f
+	}
+	if byName["quantity"].Type != TypeInteger {
+		t.Errorf("quantity type = %q, want integer", byName["quantity"].Type)
+	}
+	if byName["note"].Type != TypeString {
+		t.Errorf("note type = %q, want string from [null,string]", byName["note"].Type)
+	}
+
+	bulk := find(t, api, "orders", "bulk-create")
+	if bulk.Body == nil || bulk.Body.Flat {
+		t.Errorf("bulk body = %+v, want it recognised as nested", bulk.Body)
+	}
+}
+
+func TestSchemaTypeReadsUnions(t *testing.T) {
+	tests := []struct {
+		name  string
+		types []string
+		want  string
+	}{
+		{"single", []string{"string"}, TypeString},
+		{"nullable string", []string{"null", "string"}, TypeString},
+		{"string-encoded integer", []string{"integer", "string"}, TypeInteger},
+		{"string-encoded number", []string{"number", "string"}, TypeNumber},
+		{"nullable integer", []string{"null", "integer"}, TypeInteger},
+		{"nullable array", []string{"array", "null"}, TypeArray},
+		{"nullable object", []string{"object", "null"}, TypeObject},
+		{"null alone", []string{"null"}, TypeString},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			types := openapi3.Types(tt.types)
+			if got := schemaType(&openapi3.Schema{Type: &types}); got != tt.want {
+				t.Errorf("schemaType(%v) = %q, want %q", tt.types, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSchemaTypeWithNoType(t *testing.T) {
+	if got := schemaType(&openapi3.Schema{}); got != TypeString {
+		t.Errorf("schemaType = %q, want string when the spec states no type", got)
+	}
+	if got := schemaType(nil); got != TypeString {
+		t.Errorf("schemaType(nil) = %q, want string", got)
 	}
 }
