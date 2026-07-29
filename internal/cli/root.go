@@ -2,12 +2,15 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/dotnetemmanuel/blip/internal/output"
 )
@@ -20,9 +23,9 @@ Credentials live in ~/.config/blip/credentials.toml and are not.
 Output is machine-parseable by default: the response body on stdout,
 every diagnostic on stderr, and an exit code you can branch on.`
 
-// NewRootCommand builds a fresh command tree. Nothing is package-global, so tests
-// can run commands independently.
-func NewRootCommand() *cobra.Command {
+// NewRootCommand builds a command tree bound to rt. Nothing is package-global, so
+// tests can run commands independently.
+func NewRootCommand(rt *Runtime) *cobra.Command {
 	root := &cobra.Command{
 		Use:               "blip",
 		Short:             "Call an HTTP API from its OpenAPI spec",
@@ -36,24 +39,44 @@ func NewRootCommand() *cobra.Command {
 		return output.WithCode(err, output.ExitUsage)
 	})
 
-	root.AddCommand(newVersionCommand())
+	rt.Globals.register(root.PersistentFlags())
+
+	root.AddCommand(
+		newVersionCommand(),
+		newEnvsCommand(rt),
+		newAuthCommand(rt),
+	)
 
 	return root
 }
 
 // Execute runs the command tree and returns the process exit code.
 func Execute(args []string, stdout, stderr io.Writer) int {
-	root := NewRootCommand()
-	root.SetOut(stdout)
-	root.SetErr(stderr)
+	rt := &Runtime{
+		Globals:     &Globals{},
+		Stdout:      stdout,
+		Stderr:      stderr,
+		Stdin:       os.Stdin,
+		StdinIsTTY:  isTerminal(os.Stdin),
+		StdoutIsTTY: isTerminalWriter(stdout),
+	}
+	rt.Globals.prescan(args)
+	return Run(rt, args)
+}
+
+// Run executes args against an already-built runtime and returns the exit code.
+func Run(rt *Runtime, args []string) int {
+	root := NewRootCommand(rt)
+	root.SetOut(rt.Stdout)
+	root.SetErr(rt.Stderr)
 	root.SetArgs(args)
 
-	err := root.Execute()
+	err := root.ExecuteContext(context.Background())
 	if err == nil {
 		return output.ExitOK
 	}
 
-	fmt.Fprintf(stderr, "blip: %v\n", err)
+	fmt.Fprintf(rt.Stderr, "blip: %v\n", err)
 	return output.ExitCodeFor(classify(err))
 }
 
@@ -68,4 +91,13 @@ func classify(err error) error {
 		return output.WithCode(err, output.ExitUsage)
 	}
 	return err
+}
+
+func isTerminal(f *os.File) bool {
+	return f != nil && term.IsTerminal(int(f.Fd()))
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && isTerminal(f)
 }
