@@ -42,7 +42,7 @@ func NewRootCommand(rt *Runtime) *cobra.Command {
 	rt.Globals.register(root.PersistentFlags())
 
 	root.AddCommand(
-		newVersionCommand(),
+		newVersionCommand(rt),
 		newEnvsCommand(rt),
 		newAuthCommand(rt),
 		newRawCommand(rt),

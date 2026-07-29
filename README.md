@@ -59,6 +59,26 @@ make install                                          # installs to ~/.local/bin
 Install once, per machine. Not per repo. `make dist` cross-compiles all four targets
 into `dist/`.
 
+## Update
+
+```sh
+blip version --check
+```
+
+That asks GitHub what the newest release is and, if you are behind, prints the exact
+command for your platform. It downloads nothing and replaces nothing, so updating stays
+something you choose to run:
+
+```sh
+curl -fsSL -o blip https://github.com/dotnetemmanuel/blip/releases/latest/download/blip-linux-amd64 \
+  && chmod +x blip && mv blip "$(command -v blip)"
+```
+
+`latest/download/` always redirects to the newest release, so that line does not go stale.
+If you installed with `go install`, note that `@latest` means the newest version the Go
+module proxy has indexed, which can lag a release by minutes or hours; `GOPROXY=direct`
+bypasses it.
+
 ## Set up a repo
 
 ```sh
@@ -285,7 +305,7 @@ blip describe [--compact] [--json]        # the whole API surface
 blip envs [--json]                        # environments and resolved base URLs
 blip auth test                            # resolve credentials, print nothing secret
 blip spec [--path] [--meta]               # show or refresh the cached spec
-blip version
+blip version [--check]
 ```
 
 Global flags: `--env`, `--profile`, `--config`, `--refresh`, `--offline`, `--timeout`,

@@ -2,7 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -84,5 +87,154 @@ func TestHelpGoesToStdoutAndExitsZero(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "blip") {
 		t.Errorf("stdout = %q, want the help text", stdout)
+	}
+}
+
+func TestCompareVersions(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"v0.2.0", "v0.2.1", -1},
+		{"v0.2.1", "v0.2.1", 0},
+		{"v0.3.0", "v0.2.9", 1},
+		{"v1.0.0", "v0.9.9", 1},
+		{"v0.2.1", "0.2.1", 0},
+		{"v0.2.1-rc1", "v0.2.1", 0},
+		// A dirty build of the newest tag is still the newest release.
+		{"v0.2.1-dirty", "v0.2.1", 0},
+		// An unstamped development build really is behind every release.
+		{"0.0.0-dev", "v0.2.1", -1},
+		// Nothing to say when a version cannot be read at all.
+		{"v0.2.1", "nonsense", 0},
+		{"", "v0.2.1", 0},
+	}
+
+	for _, tt := range tests {
+		if got := compareVersions(tt.a, tt.b); got != tt.want {
+			t.Errorf("compareVersions(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// releaseStub stands in for the GitHub releases API.
+func releaseStub(t *testing.T, status int, body string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	previous := releaseAPI
+	releaseAPI = srv.URL
+	t.Cleanup(func() { releaseAPI = previous })
+}
+
+func TestVersionCheckReportsANewerRelease(t *testing.T) {
+	releaseStub(t, http.StatusOK, `{"tag_name":"v99.0.0"}`)
+
+	code, stdout, _ := run(t, "version", "--check")
+
+	if code != output.ExitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "a newer release is available: v99.0.0") {
+		t.Errorf("stdout = %q, want the newer version named", stdout)
+	}
+	if !strings.Contains(stdout, "curl -fsSL") {
+		t.Errorf("stdout = %q, want the command to run", stdout)
+	}
+	if !strings.Contains(stdout, runtime.GOOS+"-"+runtime.GOARCH) {
+		t.Errorf("stdout = %q, want the binary for this machine", stdout)
+	}
+}
+
+func TestVersionCheckIsQuietWhenCurrent(t *testing.T) {
+	releaseStub(t, http.StatusOK, `{"tag_name":"`+Version()+`"}`)
+
+	code, stdout, _ := run(t, "version", "--check")
+
+	if code != output.ExitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "is the newest release") {
+		t.Errorf("stdout = %q, want it to say there is nothing to do", stdout)
+	}
+	if strings.Contains(stdout, "curl") {
+		t.Errorf("stdout = %q, want no upgrade command when there is nothing to upgrade", stdout)
+	}
+}
+
+func TestVersionWithoutCheckTouchesNoNetwork(t *testing.T) {
+	asked := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		asked = true
+		_, _ = w.Write([]byte(`{"tag_name":"v99.0.0"}`))
+	}))
+	defer srv.Close()
+	previous := releaseAPI
+	releaseAPI = srv.URL
+	defer func() { releaseAPI = previous }()
+
+	if code, _, _ := run(t, "version"); code != output.ExitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	if asked {
+		t.Error("plain version reached the network")
+	}
+}
+
+func TestVersionCheckFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   int
+	}{
+		{"rate limited", http.StatusForbidden, `{}`, output.ExitAuth},
+		{"not found", http.StatusNotFound, `{}`, output.ExitClient},
+		{"no version named", http.StatusOK, `{}`, output.ExitTransport},
+		{"not json", http.StatusOK, `<html>`, output.ExitTransport},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			releaseStub(t, tt.status, tt.body)
+
+			code, stdout, _ := run(t, "version", "--check")
+
+			if code != tt.want {
+				t.Errorf("exit = %d, want %d", code, tt.want)
+			}
+			// The version itself printed before the lookup was attempted.
+			if !strings.HasPrefix(stdout, "blip ") {
+				t.Errorf("stdout = %q, want the version line regardless", stdout)
+			}
+		})
+	}
+}
+
+func TestVersionCheckRespectsOffline(t *testing.T) {
+	asked := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		asked = true
+		_, _ = w.Write([]byte(`{"tag_name":"v99.0.0"}`))
+	}))
+	defer srv.Close()
+	previous := releaseAPI
+	releaseAPI = srv.URL
+	defer func() { releaseAPI = previous }()
+
+	code, _, stderr := run(t, "version", "--check", "--offline")
+
+	if code != output.ExitConfig {
+		t.Errorf("exit = %d, want %d", code, output.ExitConfig)
+	}
+	if asked {
+		t.Error("--offline still reached the network")
+	}
+	if !strings.Contains(stderr, "offline") {
+		t.Errorf("stderr = %q, want it to explain", stderr)
 	}
 }
