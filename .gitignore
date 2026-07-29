@@ -1,0 +1,22 @@
+# Build output
+/blip
+/dist/
+/bin/
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Local overrides that must never be committed
+.blip.local.toml
+credentials.toml
+
+# Machine-local agent settings
+.claude/settings.local.json
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
