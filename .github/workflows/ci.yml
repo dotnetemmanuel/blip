@@ -1,8 +1,13 @@
 name: ci
 
-# Manual only for now. Flip to push/pull_request once the tool does something worth gating on.
+# Manual only for now. Flip to push/pull_request when the repo goes public.
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: attach the cross-compiled binaries as an artifact
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -52,6 +57,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: make build BINARY=blip-${{ matrix.goos }}-${{ matrix.goarch }}
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.release }}
         with:
           name: blip-${{ matrix.goos }}-${{ matrix.goarch }}
           path: blip-${{ matrix.goos }}-${{ matrix.goarch }}

@@ -11,7 +11,9 @@ LDFLAGS := -s -w \
 	-X $(PKG)/internal/cli.commit=$(COMMIT) \
 	-X $(PKG)/internal/cli.date=$(DATE)
 
-.PHONY: all build install uninstall test vet fmt lint tidy clean
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+
+.PHONY: all build install uninstall test vet fmt lint tidy golden dist clean
 
 all: lint test build
 
@@ -44,6 +46,24 @@ lint: vet
 tidy:
 	go mod tidy
 
+# Rewrites the pinned describe --compact and --dry-run output. Deliberate act:
+# both are contracts a caller parses.
+golden:
+	go test ./internal/build ./internal/cli -update
+
+dist:
+	@rm -rf dist && mkdir -p dist
+	@for platform in $(PLATFORMS); do \
+		goos=$${platform%/*}; goarch=$${platform#*/}; \
+		out=dist/$(BINARY)-$$goos-$$goarch; \
+		echo "building $$out"; \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch \
+			go build -trimpath -ldflags '$(LDFLAGS)' -o $$out . || exit 1; \
+	done
+	@cd dist && sha256sum * > SHA256SUMS
+	@ls -1 dist
+
 clean:
 	rm -f $(BINARY)
+	rm -rf dist
 	go clean -testcache

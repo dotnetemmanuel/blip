@@ -1,0 +1,4 @@
+DELETE http://api.test/api/orders/9
+env: dev
+Accept: application/json
+Authorization: Bearer <redacted>

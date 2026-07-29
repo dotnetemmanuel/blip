@@ -8,8 +8,17 @@ blip is built for AI coding agents first. An agent debugging a backend needs to 
 backend, the way a browser extension lets an agent see a running UI. Humans are the
 secondary consumer, and the tool doubles as a smoke-test harness.
 
-> **Status: in development.** The repo is at milestone M0 (skeleton). Nothing below is
-> usable yet. See [Milestones](#milestones) for what exists and what does not.
+```
+$ blip describe --compact
+orders list                          GET     /api/orders                         ?status,?page,?pageSize,?tag
+orders create                        POST    /api/orders                         body!:CreateOrderRequest
+orders get                           GET     /api/orders/{id}                    id,@X-Tenant
+orders delete-by-id                  DELETE  /api/orders/{id}                    id
+orders cancel                        POST    /api/orders/{id}/cancel             id  body!:CancelReason
+
+$ blip orders get 7f00-0101
+{"id":"7f00-0101","status":"open","total":42.5}
+```
 
 ## Why it looks like this
 
@@ -25,14 +34,119 @@ Because the primary caller is a program, not a person:
 ## Install
 
 ```sh
-make install    # builds and installs to ~/.local/bin/blip
+git clone https://github.com/dotnetemmanuel/blip
+cd blip
+make install        # builds and installs to ~/.local/bin/blip
 ```
 
-Install once, per machine. Not per repo.
+Install once, per machine. Not per repo. `make dist` cross-compiles for linux and darwin
+on amd64 and arm64 into `dist/`.
+
+## Walkthrough
+
+Start with a service running locally. This example uses a .NET minimal API on
+`https://localhost:7284`, but anything that serves an OpenAPI document works.
+
+**1. Write `.blip.toml` at your repo root and commit it.**
+
+```toml
+name = "orders"
+default_env = "dev"
+
+[env.dev]
+base_url = "https://localhost:7284"
+insecure = true            # dotnet dev-certs, localhost only
+auth     = "orders-dev"
+```
+
+No `spec_url` is needed if the spec is at one of the usual places; blip probes them.
+
+**2. Put the credential outside the repo**, in `~/.config/blip/credentials.toml` at mode
+`0600`:
+
+```toml
+[orders-dev]
+type  = "bearer"
+token_command = "pass show work/orders/dev"
+```
+
+Check it resolves. Nothing secret is printed, only a fingerprint:
+
+```
+$ blip auth test
+env       dev
+base_url  https://localhost:7284
+profile   orders-dev
+resolved  bearer token sha256:4e1f8f15
+```
+
+**3. Look at the API.** This is the command to run first, and usually the only one you need
+before making a call:
+
+```
+$ blip describe --compact
+customers orders-get-by-customer-id  GET     /api/customers/{customerId}/orders  customerId
+healthz get                          GET     /healthz
+orders list                          GET     /api/orders                         ?status,?page,?pageSize,?tag
+orders create                        POST    /api/orders                         body!:CreateOrderRequest
+orders get                           GET     /api/orders/{id}                    id,@X-Tenant
+orders delete-by-id                  DELETE  /api/orders/{id}                    id
+orders cancel                        POST    /api/orders/{id}/cancel             id  body!:CancelReason
+orders lines-get-by-id-by-line-id    GET     /api/orders/{id}/lines/{lineId}     id,lineId
+```
+
+Reading the notation: path parameters are bare and positional, `?name` is a query flag,
+`@name` is a header flag, a trailing `*` means required, and `body:Schema` is a request
+body (`body!:Schema` when the body is required).
+
+Two of those names were derived, because the endpoints were declared without `.WithName()`
+and so carry no `operationId`. blip says so once, on stderr:
+
+```
+blip: 4 operations have no operationId, so blip derived names for them: GET /api/customers/{customerId}/orders,
+DELETE /api/orders/{id}, ... Add .WithName() and .WithTags() upstream to control them
+```
+
+**4. Read something.**
+
+```
+$ blip orders list --status open --page 2
+{"items":[...],"page":2}
+
+$ blip orders get 7f00-0101 --header-x-tenant acme
+{"id":"7f00-0101","status":"open"}
+```
+
+**5. Check a mutation before making it.** `--dry-run` resolves everything, prints the
+request with secrets redacted, and sends nothing:
+
+```
+$ blip orders create --field sku=A1 --field quantity:=2 --dry-run
+POST https://localhost:7284/api/orders
+env: dev
+Accept: application/json
+Authorization: Bearer <redacted>
+Content-Type: application/json
+
+{"quantity":2,"sku":"A1"}
+```
+
+`--field sku=A1` sends a string; `--field quantity:=2` sends raw JSON, which is how you
+send a number, a boolean or null. Anything that is not a flat object uses
+`--data @order.json`, `--data @-` or inline JSON.
+
+**6. Make it.** A mutating verb needs `--yes` when there is no terminal, and prompts when
+there is one:
+
+```
+$ blip orders create --field sku=A1 --field quantity:=2 --yes
+{"id":"7f00-0102","status":"open"}
+```
 
 ## Configure
 
-Two files, and the split between them is the point.
+Two files, and the split between them is the point. See
+[`.blip.toml.example`](.blip.toml.example) for a commented template.
 
 ### `.blip.toml`, committed at your repo root
 
@@ -52,7 +166,12 @@ base_url = "https://api.example.internal"
 auth     = "orders-prod"
 readonly = true                  # hard-blocks every non-GET/HEAD/OPTIONS
 
-# Optional. Hand-declared routes, for APIs with no spec at all.
+[env.staging]
+base_url    = "https://staging.example.internal"
+client_cert = "certs/client.pem" # mTLS; relative to this file
+client_key  = "certs/client.key"
+
+# Hand-declared routes, for an API with no spec at all.
 [[route]]
 name   = "health"
 method = "GET"
@@ -60,11 +179,17 @@ path   = "/healthz"
 ```
 
 blip walks up from the current directory looking for `.blip.toml`, and the first hit wins.
-`blip.toml` without the leading dot is accepted too, if you prefer it visible.
+`blip.toml` without the leading dot is accepted too, if you prefer it visible. `--config`
+overrides both.
 
-`insecure = true` is rejected unless the host resolves to `localhost`, `127.0.0.1` or
-`::1`. Skipping TLS verification against a real host is not something a committed file
-should be able to arrange.
+Unknown keys are an error rather than being ignored, so a typo like `read_only` cannot
+silently disable the guard you meant to switch on.
+
+`insecure = true` is rejected unless the host is loopback. Skipping TLS verification
+against a real host is not something a committed file should be able to arrange.
+
+A `[[route]]` with no `group` becomes a top-level command (`blip health`); give it a
+`group` to nest it. Routes merge into the generated tree, and work with no spec at all.
 
 ### `~/.config/blip/credentials.toml`, never committed, mode `0600`
 
@@ -89,9 +214,14 @@ value_command = "op read op://work/legacy/key"
 Auth types: `none`, `bearer`, `header`, `basic`, `oauth2_cc`.
 
 Every secret field has a `_command` variant (`token_command`, `client_secret_command`,
-`value_command`, `password_command`). blip runs the command and uses its trimmed stdout.
-That buys 1Password, `pass`, gopass, Vault and everything else at once, with no per-vault
-integration to maintain. `${ENV_VAR}` interpolation works in value fields too.
+`value_command`, `password_command`). blip runs the command through `sh` and uses its
+trimmed stdout. That buys 1Password, `pass`, gopass, Vault and everything else at once,
+with no per-vault integration to maintain. `${ENV_VAR}` interpolation works in value
+fields too.
+
+`oauth2_cc` tokens are cached at `~/.cache/blip/tokens/` at `0600` and refreshed within
+60 seconds of expiry. The cache key includes the scope, so widening a scope cannot be
+served from a narrower cached token.
 
 If the credentials file has any mode other than `0600`, blip refuses to read it and says so.
 
@@ -102,27 +232,34 @@ blip <group> <operation> [args] [flags]   # generated from the spec
 blip call <operationId> [args] [flags]    # stable, bypasses the generated tree
 blip raw <METHOD> <PATH> [flags]          # zero-spec escape hatch
 blip describe [--compact] [--json]        # the whole API surface
-blip envs                                 # environments and resolved base URLs
+blip envs [--json]                        # environments and resolved base URLs
 blip auth test                            # resolve credentials, print nothing secret
-blip spec [--refresh] [--path]            # show or refresh the cached spec
+blip spec [--path] [--meta]               # show or refresh the cached spec
 blip version
 ```
 
 Global flags: `--env`, `--profile`, `--config`, `--refresh`, `--offline`, `--timeout`,
-`--output {json|raw|status}`, `--include-headers`, `--verbose`, `--dry-run`, `--yes`.
+`--output {json|raw|status}`, `--include-headers`, `--verbose`, `--dry-run`, `--yes`,
+`--strict`.
 
-`blip describe --compact` is the one to reach for first. One dense line per operation:
+`blip call` addresses an operation by its `operationId`, or by `group-name` when the spec
+gives no id. Those names do not move when tags or derivation change, so they are the safer
+thing to put in a script.
 
-```
-orders list      GET   /api/orders              ?status,?page,?pageSize
-orders get       GET   /api/orders/{id}         id
-orders create    POST  /api/orders              body: CreateOrderRequest
-orders cancel    POST  /api/orders/{id}/cancel  id  body: CancelReason
-```
+`blip raw` applies the base URL, credentials, TLS settings and safety rules but needs no
+spec. A path must start with `/`; blip will not send your production credentials to
+another host.
 
-`--dry-run` prints the fully resolved request, secrets redacted, and sends nothing. It
-works for every command including mutations, and it is how a caller checks itself before
-acting.
+Generated `--help` carries the operation's summary, description and each parameter's
+description straight from the spec.
+
+### Output contract
+
+- `--output json` (default): the response body on stdout, pretty-printed at a terminal and
+  compact when piped.
+- `--output raw`: body bytes, untouched.
+- `--output status`: the status code alone.
+- `--include-headers`: response headers on **stderr**, so stdout stays pipeable.
 
 ### Exit codes
 
@@ -135,8 +272,9 @@ acting.
 | 4 | Auth error (401/403, or credential resolution failed) |
 | 5 | Blocked by a safety rule |
 | 6 | Transport error (DNS, connection refused, timeout, TLS) |
-| 7 | 4xx other than 401/403 |
+| 7 | 4xx other than 401/403, and any other non-2xx |
 | 8 | 5xx |
+| 9 | Response did not match the spec schema, under `--strict` |
 
 A non-2xx still prints the response body to stdout, with a one-line summary on stderr.
 The API's own error payload is usually the whole answer, so blip does not swallow it.
@@ -146,14 +284,25 @@ The API's own error payload is usually the whole answer, so blip does not swallo
 Three rules, small enough to be obviously correct:
 
 1. `readonly = true` on an environment blocks every method except GET, HEAD and OPTIONS.
-   No flag overrides it. Exit 5.
+   No flag overrides it, including `--dry-run`. Exit 5.
 2. A mutating verb with no TTY requires `--yes`. Without it, exit 5. blip never prompts
    when stdin is not a terminal.
 3. With a TTY, mutating verbs confirm first, showing method, resolved URL and environment.
    `--yes` skips the prompt.
 
-`Authorization`, `Cookie`, `Set-Cookie` and any configured secret header are redacted in
-all verbose and dry-run output. A resolved secret is never logged, not even at `--verbose`.
+`--dry-run` is exempt from rules 2 and 3, since it sends nothing. It still resolves
+credentials, so the header it prints is the header that would be sent; for `oauth2_cc`
+that means a real request to the token endpoint, though never to the API itself.
+
+`Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` are redacted in all
+verbose and dry-run output, and every resolved secret is redacted by value wherever it
+appears, including inside a request body.
+
+### Response validation
+
+blip checks response bodies against the schema the spec declares for that status. Drift is
+a warning by default, because a mismatched schema should never stop you debugging.
+`--strict` turns it into a failure with exit 9, for when the contract is the thing under test.
 
 ## Specs
 
@@ -165,17 +314,17 @@ Point `spec_url` wherever your spec lives. With it absent, blip probes, in order
 4. `/swagger/v1/swagger.yaml`
 
 The first two cover .NET minimal APIs, whether the spec comes from
-`Microsoft.AspNetCore.OpenApi` or Swashbuckle. Note that a docs UI such as Scalar or
-Swagger UI renders a spec, it does not serve one; point blip at the JSON, not the page.
+`Microsoft.AspNetCore.OpenApi` or Swashbuckle. A docs UI such as Scalar or Swagger UI
+renders a spec, it does not serve one; point blip at the JSON, not the page.
 
-Specs are cached under `~/.cache/blip/<name>/` and revalidated with `If-None-Match`.
-`--refresh` forces it, `--offline` forbids the network. If the backend is down but the
-cache is warm, blip warns and carries on, because a backend being down is exactly when
-you need this most.
+Specs are cached under `~/.cache/blip/specs/<name>/<env>/` and revalidated with
+`If-None-Match` on each run, which costs one small conditional request. `--refresh` forces
+a full fetch, `--offline` forbids the network and fails on a cold cache. If the backend
+cannot be reached but the cache is warm, blip warns and carries on, because a backend
+being down is exactly when you need this most.
 
-Operations with no `operationId`, which is what minimal API endpoints declared without
-`.WithName()` produce, get a deterministic name derived from method and path. blip warns
-once naming them, so you know where to add `.WithName()` and `.WithTags()` upstream.
+A spec that requires authentication is retried with credentials, but only after an
+unauthenticated attempt has been refused, so a public spec never reaches for a vault.
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected when set.
 
@@ -202,21 +351,22 @@ Permission rules prefix-match the whole command string, so a piped invocation su
 `blip orders list | jq .` needs each subcommand allowed independently. That is part of why
 blip formats its own JSON rather than leaning on `jq`.
 
-## Milestones
-
-- [x] **M0** Skeleton: module, cobra root, `version`, Makefile, CI
-- [ ] **M1** Config and credentials: discovery, env resolution, `_command`, `envs`, `auth test`
-- [ ] **M2** Raw requests: `raw`, auth application, output modes, exit codes, safety rules
-- [ ] **M3** Spec fetching: probe, ETag cache, `--refresh`, `--offline`, `spec`
-- [ ] **M4** Generated command tree: name derivation, grouping, param binding, `call`
-- [ ] **M5** `describe` and specless `[[route]]` entries
-- [ ] **M6** Polish: docs, release artifacts
-
 ## What blip is not
 
 Not a general HTTP client competing with curl, httpie or restish. No TUI, no REPL. No
 response templating language and no `jq` reimplementation; it emits JSON and you pipe it.
 No code generation, the command tree is always built from the spec at runtime. No plugins.
+
+## Development
+
+```sh
+make lint test build     # vet, gofmt check, tests, binary
+make dist                # cross-compiled binaries into dist/
+make golden              # regenerate the golden files, deliberately
+```
+
+`describe --compact` and `--dry-run` output are pinned by golden files, because both are
+contracts a caller parses. No test touches the network.
 
 ## License
 

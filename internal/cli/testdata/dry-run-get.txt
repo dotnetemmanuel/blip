@@ -1,0 +1,5 @@
+GET http://api.test/api/orders/42
+env: dev
+Accept: application/json
+Authorization: Bearer <redacted>
+X-Tenant: acme

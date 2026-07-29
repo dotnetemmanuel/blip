@@ -1,0 +1,7 @@
+POST http://api.test/api/orders
+env: dev
+Accept: application/json
+Authorization: Bearer <redacted>
+Content-Type: application/json
+
+{"quantity":2,"sku":"A1"}
