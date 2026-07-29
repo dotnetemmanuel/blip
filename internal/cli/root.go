@@ -46,6 +46,7 @@ func NewRootCommand(rt *Runtime) *cobra.Command {
 		newEnvsCommand(rt),
 		newAuthCommand(rt),
 		newRawCommand(rt),
+		newSpecCommand(rt),
 	)
 
 	return root

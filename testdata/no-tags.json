@@ -1,0 +1,42 @@
+{
+  "openapi": "3.0.1",
+  "info": { "title": "Untagged", "version": "1.0.0" },
+  "paths": {
+    "/api/v1/reports": {
+      "get": { "summary": "List reports", "responses": { "200": { "description": "OK" } } },
+      "post": {
+        "summary": "Create a report",
+        "requestBody": {
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/api/v1/reports/{reportId}": {
+      "get": {
+        "summary": "Get a report",
+        "parameters": [
+          { "name": "reportId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "delete": {
+        "parameters": [
+          { "name": "reportId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "204": { "description": "No Content" } }
+      }
+    },
+    "/api/v1/exports": {
+      "get": { "summary": "List exports", "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/v1/exports/{exportId}/download": {
+      "get": {
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    }
+  }
+}

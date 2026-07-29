@@ -14,6 +14,7 @@ import (
 	"github.com/dotnetemmanuel/blip/internal/creds"
 	"github.com/dotnetemmanuel/blip/internal/output"
 	"github.com/dotnetemmanuel/blip/internal/request"
+	"github.com/dotnetemmanuel/blip/internal/spec"
 	"github.com/dotnetemmanuel/blip/internal/xdg"
 )
 
@@ -51,6 +52,10 @@ type Runtime struct {
 	clientOnce sync.Once
 	client     *http.Client
 	clientErr  error
+
+	specOnce sync.Once
+	spec     *spec.Spec
+	specErr  error
 }
 
 // Warnf writes a diagnostic to stderr. Nothing blip warns about belongs on stdout.
@@ -105,6 +110,46 @@ func (rt *Runtime) Client() (*http.Client, error) {
 		rt.client, rt.clientErr = request.NewClient(env, rt.Globals.Timeout)
 	})
 	return rt.client, rt.clientErr
+}
+
+// Spec returns the OpenAPI document for the resolved environment.
+func (rt *Runtime) Spec(ctx context.Context) (*spec.Spec, error) {
+	rt.specOnce.Do(func() {
+		cfg, err := rt.Config()
+		if err != nil {
+			rt.specErr = err
+			return
+		}
+		env, err := rt.Env()
+		if err != nil {
+			rt.specErr = err
+			return
+		}
+		client, err := rt.Client()
+		if err != nil {
+			rt.specErr = err
+			return
+		}
+
+		fetcher := &spec.Fetcher{
+			Client:  client,
+			Refresh: rt.Globals.Refresh,
+			Offline: rt.Globals.Offline,
+			Warnf:   rt.Warnf,
+			Authorize: func(ctx context.Context, req *http.Request) error {
+				a, err := rt.Authenticator(ctx)
+				if err != nil {
+					return err
+				}
+				return a.Apply(ctx, req)
+			},
+		}
+		rt.spec, rt.specErr = fetcher.Load(ctx, cfg.Name, env)
+		if rt.spec != nil {
+			rt.Verbosef("spec %s from %s", rt.spec.Status, rt.spec.Meta.URL)
+		}
+	})
+	return rt.spec, rt.specErr
 }
 
 // ProfileName is the credentials profile in force: --profile if given, otherwise
