@@ -77,7 +77,7 @@ type Fetcher struct {
 }
 
 func configError(format string, args ...any) error {
-	return output.WithCode(fmt.Errorf(format, args...), output.ExitConfig)
+	return output.Configf(format, args...)
 }
 
 func (f *Fetcher) warn(format string, args ...any) {
@@ -123,6 +123,7 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 	}
 
 	var reachable, unreachable []string
+	transient := false
 	for i, candidate := range candidates {
 		etag := ""
 		if !f.Refresh && candidate == cachedMeta.URL {
@@ -131,7 +132,21 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 
 		status, body, meta, err := f.get(ctx, candidate, etag, false)
 		if isUnauthorized(status) && f.Authorize != nil {
+			if !sameHost(candidate, env.BaseURL) {
+				return nil, output.Blockedf(
+					"refusing to send credentials to %s: env.%s.spec_url points at a different host from base_url (%s)",
+					candidate, env.Name, env.BaseURL.Host)
+			}
 			status, body, meta, err = f.get(ctx, candidate, etag, true)
+			if err != nil {
+				// A credential that cannot be produced is an auth problem, not an
+				// unreachable host, and the code it carries has to survive.
+				return nil, err
+			}
+			if isUnauthorized(status) {
+				return nil, output.Authf(
+					"%s returned %d even with the credentials for env.%s", candidate, status, env.Name)
+			}
 		}
 		switch {
 		case err != nil:
@@ -139,10 +154,14 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 			continue
 
 		case status == http.StatusNotModified && cached != nil:
-			return &Spec{Data: cached, Meta: mergeMeta(cachedMeta, meta), Path: specPath(dir), Status: StatusRevalidated}, nil
+			merged := mergeMeta(cachedMeta, meta)
+			if err := writeCache(dir, cached, merged); err != nil {
+				f.warn("%v", err)
+			}
+			return &Spec{Data: cached, Meta: merged, Path: specPath(dir), Status: StatusRevalidated}, nil
 
 		case status == http.StatusOK:
-			if !looksLikeSpec(body, candidate) {
+			if !looksLikeSpec(body) {
 				reachable = append(reachable, fmt.Sprintf("%s (200 but not an OpenAPI document)", candidate))
 				continue
 			}
@@ -155,14 +174,17 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 			}
 			// A server with no ETag makes every run a full fetch; only the bytes
 			// can say whether anything actually changed.
-			status := StatusFetched
+			outcome := StatusFetched
 			if bytes.Equal(body, cached) {
-				status = StatusRevalidated
+				outcome = StatusRevalidated
 			}
-			return &Spec{Data: body, Meta: meta, Path: specPath(dir), Status: status}, nil
+			return &Spec{Data: body, Meta: meta, Path: specPath(dir), Status: outcome}, nil
 
 		default:
 			reachable = append(reachable, fmt.Sprintf("%s (%d)", candidate, status))
+			if !definitelyAbsent(status) {
+				transient = true
+			}
 		}
 	}
 
@@ -173,10 +195,16 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 		return &Spec{Data: cached, Meta: cachedMeta, Path: specPath(dir), Status: StatusStale}, nil
 	}
 
-	if len(reachable) > 0 {
+	if len(reachable) > 0 && !transient {
 		rememberNoSpec(dir)
 	}
 	return nil, f.noSpecError(env, reachable, unreachable)
+}
+
+// definitelyAbsent distinguishes "this service serves no spec here" from "this
+// service is not ready yet". Only the first is worth remembering.
+func definitelyAbsent(status int) bool {
+	return status == http.StatusNotFound || status == http.StatusGone
 }
 
 func noSpecMarker(dir string) string { return filepath.Join(dir, "nospec") }
@@ -253,6 +281,17 @@ func isUnauthorized(status int) bool {
 	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
+// sameHost reports whether a spec URL lives on the API's own host. Credentials
+// are only ever offered to that host: .blip.toml is committed and reviewed like
+// any other file, and it must not be able to name somewhere else to send them.
+func sameHost(rawURL string, base *url.URL) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, base.Host)
+}
+
 func (f *Fetcher) get(ctx context.Context, rawURL, etag string, authorize bool) (int, []byte, Meta, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -304,12 +343,10 @@ func mergeMeta(cached, fresh Meta) Meta {
 }
 
 // looksLikeSpec keeps blip from caching an HTML error page that came back 200.
-func looksLikeSpec(body []byte, sourceURL string) bool {
+func looksLikeSpec(body []byte) bool {
 	var doc map[string]any
 	if err := json.Unmarshal(body, &doc); err != nil {
-		if !strings.HasSuffix(sourceURL, ".yaml") && !strings.HasSuffix(sourceURL, ".yml") {
-			return false
-		}
+		// YAML is not only served from a .yaml path, so try it whatever the URL.
 		if err := yaml.Unmarshal(body, &doc); err != nil {
 			return false
 		}
@@ -352,7 +389,7 @@ func writeCache(dir string, body []byte, meta Meta) error {
 }
 
 func writeFileAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}

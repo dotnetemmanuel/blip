@@ -163,15 +163,22 @@ func singularize(s string) string {
 	return s
 }
 
-// deduplicate makes names unique within a namespace, appending a number. Callers
-// must present names in a deterministic order or the numbering will move.
-type deduplicator map[string]int
+// deduplicator makes names unique within a namespace, appending a number.
+// Callers must present names in a deterministic order or the numbering moves.
+type deduplicator map[string]bool
 
+// unique returns a name nothing else in this namespace holds, including a
+// numbered name an earlier operation was given or a later one asks for.
 func (d deduplicator) unique(name string) string {
-	count := d[name]
-	d[name] = count + 1
-	if count == 0 {
+	if !d[name] {
+		d[name] = true
 		return name
 	}
-	return name + "-" + strconv.Itoa(count+1)
+	for suffix := 2; ; suffix++ {
+		candidate := name + "-" + strconv.Itoa(suffix)
+		if !d[candidate] {
+			d[candidate] = true
+			return candidate
+		}
+	}
 }

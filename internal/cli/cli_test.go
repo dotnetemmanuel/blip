@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/output"
 )
 
@@ -344,5 +345,40 @@ func TestUnknownCommandWithNoConfigReportsTheConfigProblem(t *testing.T) {
 	}
 	if !strings.Contains(got.stderr, ".blip.toml") {
 		t.Errorf("stderr = %q, want the real problem named", got.stderr)
+	}
+}
+
+// A spec tag must never be able to shadow one of blip's own commands, so the
+// reserved list has to keep up with whatever the root registers.
+func TestEveryRootCommandIsReserved(t *testing.T) {
+	rt := &Runtime{Globals: &Globals{}, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+
+	for _, cmd := range NewRootCommand(rt).Commands() {
+		if !build.Reserved[cmd.Name()] {
+			t.Errorf("command %q is not in build.Reserved, so a spec tag could shadow it", cmd.Name())
+		}
+	}
+	// call and describe are attached only when a spec loads, so pin them too.
+	for _, name := range []string{"call", "describe"} {
+		if !build.Reserved[name] {
+			t.Errorf("%q is not reserved", name)
+		}
+	}
+}
+
+func TestSpeclessCommandsAllExist(t *testing.T) {
+	rt := &Runtime{Globals: &Globals{}, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+
+	registered := map[string]bool{}
+	for _, cmd := range NewRootCommand(rt).Commands() {
+		registered[cmd.Name()] = true
+	}
+	for name := range specless {
+		if name == "completion" || name == "help" {
+			continue
+		}
+		if !registered[name] {
+			t.Errorf("%q is listed as specless but is not a command", name)
+		}
 	}
 }

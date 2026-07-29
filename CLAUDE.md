@@ -32,7 +32,13 @@ consumer is a coding agent that needs to call a backend while debugging; humans 
 - **Credentials resolve lazily.** `--help`, `describe` and `envs` must never reach for a
   vault. Only `send` and `auth test` resolve them.
 - **Secrets are redacted by value, not just by header name.** `internal/output.Redactor`
-  replaces the literal secret wherever it appears, which is what catches it in a request body.
+  replaces the literal secret wherever it appears: body, query string, summary line, and the
+  final error print in `Run`. Matching is literal, so a re-encoded secret is not caught.
+- **A spec never owns a blip flag.** `binder.register` moves a parameter aside when it wants
+  a name a global or a body flag holds. A spec that could claim `--dry-run` could send the
+  mutation the caller was checking.
+- **Credentials only ever go to the API's own host.** The spec fetch refuses to authorize
+  against a different host, and a cross-host redirect is refused rather than followed.
 - **`readonly` is not overridable.** Not by `--yes`, not by `--dry-run`.
 - **A schema type is a set, not a value.** OpenAPI 3.1, which .NET 10 emits, writes
   `"type": ["integer", "string"]`. kin-openapi's `Types.Is()` answers false for every

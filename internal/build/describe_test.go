@@ -340,7 +340,4 @@ func TestValidationIsSkippedWithNoDeclaredSchema(t *testing.T) {
 	if err := op.ValidateResponse(200, []byte(`{"anything":true}`)); err != nil {
 		t.Errorf("ValidateResponse = %v, want nil when the spec declares no schema", err)
 	}
-	if op.HasResponseSchema(200) {
-		t.Error("HasResponseSchema = true, want false")
-	}
 }

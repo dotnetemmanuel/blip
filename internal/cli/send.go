@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/dotnetemmanuel/blip/internal/build"
@@ -14,23 +12,9 @@ import (
 	"github.com/dotnetemmanuel/blip/internal/safety"
 )
 
-// call is one resolved request, whatever produced it: raw, a generated command or
-// a hand-declared route.
-type call struct {
-	Method string
-	Path   string
-	Query  url.Values
-	Header http.Header
-	Body   []byte
-
-	// operation is set when the call came from the spec, which is what makes
-	// response validation possible.
-	operation *build.Operation
-}
-
 // send applies safety, auth and output rules, then either prints the request
-// (--dry-run) or performs it.
-func (rt *Runtime) send(ctx context.Context, c call) error {
+// (--dry-run) or performs it. op is nil for raw, which has no spec behind it.
+func (rt *Runtime) send(ctx context.Context, req *request.Request, op *build.Operation) error {
 	if err := output.ValidateMode(rt.Globals.Output); err != nil {
 		return err
 	}
@@ -40,13 +24,6 @@ func (rt *Runtime) send(ctx context.Context, c call) error {
 		return err
 	}
 
-	req := &request.Request{
-		Method: c.Method,
-		Path:   c.Path,
-		Query:  c.Query,
-		Header: c.Header,
-		Body:   c.Body,
-	}
 	httpReq, err := req.HTTPRequest(ctx, env.BaseURL)
 	if err != nil {
 		return err
@@ -81,10 +58,10 @@ func (rt *Runtime) send(ctx context.Context, c call) error {
 	}
 
 	if rt.Globals.DryRun {
-		return renderer.DryRun(httpReq.Method, httpReq.URL.String(), env.Name, httpReq.Header, c.Body)
+		return renderer.DryRun(httpReq.Method, httpReq.URL.String(), env.Name, httpReq.Header, req.Body)
 	}
 
-	rt.Verbosef("%s %s", httpReq.Method, httpReq.URL)
+	rt.Verbosef("%s %s", httpReq.Method, renderer.Redactor.String(httpReq.URL.String()))
 	for name, values := range renderer.Redactor.Header(httpReq.Header) {
 		for _, v := range values {
 			rt.Verbosef("> %s: %s", name, v)
@@ -104,7 +81,7 @@ func (rt *Runtime) send(ctx context.Context, c call) error {
 		return err
 	}
 
-	if err := rt.validate(c.operation, resp.Status, resp.Body); err != nil {
+	if err := rt.validate(op, resp.Status, resp.Body); err != nil {
 		return err
 	}
 

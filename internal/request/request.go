@@ -30,7 +30,7 @@ type Response struct {
 }
 
 func usageError(format string, args ...any) error {
-	return output.WithCode(fmt.Errorf(format, args...), output.ExitUsage)
+	return output.Usagef(format, args...)
 }
 
 // ResolveURL applies a path and query to a base URL. A path prefix on the base
@@ -48,7 +48,14 @@ func ResolveURL(base *url.URL, rawPath string, query url.Values) (*url.URL, erro
 
 	resolved := *base
 	resolved.Path = strings.TrimSuffix(base.Path, "/") + ref.Path
+
+	// Keep the encoded form when it differs, or an escaped path argument would be
+	// decoded back into separators and could address a different endpoint.
+	escaped := strings.TrimSuffix(base.EscapedPath(), "/") + ref.EscapedPath()
 	resolved.RawPath = ""
+	if escaped != resolved.Path {
+		resolved.RawPath = escaped
+	}
 
 	merged := base.Query()
 	for key, values := range ref.Query() {

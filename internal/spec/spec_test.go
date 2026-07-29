@@ -415,21 +415,21 @@ func TestLooksLikeSpec(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
-		url  string
 		want bool
 	}{
-		{"openapi 3", `{"openapi":"3.0.1"}`, "/openapi/v1.json", true},
-		{"swagger 2", `{"swagger":"2.0"}`, "/swagger/v1/swagger.json", true},
-		{"json but not a spec", `{"message":"not found"}`, "/openapi/v1.json", false},
-		{"html", `<html></html>`, "/openapi/v1.json", false},
-		{"empty", ``, "/openapi/v1.json", false},
-		{"yaml spec at a yaml path", "openapi: 3.0.1\n", "/openapi/v1.yaml", true},
-		{"yaml spec at a json path", "openapi: 3.0.1\n", "/openapi/v1.json", false},
+		{"openapi 3", `{"openapi":"3.0.1"}`, true},
+		{"swagger 2", `{"swagger":"2.0"}`, true},
+		{"json but not a spec", `{"message":"not found"}`, false},
+		{"html", `<html></html>`, false},
+		{"empty", ``, false},
+		{"yaml spec", "openapi: 3.0.1\n", true},
+		{"yaml spec served from a path with no extension", "swagger: \"2.0\"\n", true},
+		{"yaml that is not a spec", "message: not found\n", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := looksLikeSpec([]byte(tt.body), tt.url); got != tt.want {
+			if got := looksLikeSpec([]byte(tt.body)); got != tt.want {
 				t.Errorf("looksLikeSpec = %v, want %v", got, tt.want)
 			}
 		})
@@ -534,5 +534,157 @@ func TestUnchangedBytesCountAsRevalidatedWithoutAnETag(t *testing.T) {
 	}
 	if third.Status != StatusFetched {
 		t.Errorf("Status = %q, want a changed spec to read as fetched", third.Status)
+	}
+}
+
+func TestCredentialsNeverGoToAForeignSpecHost(t *testing.T) {
+	// .blip.toml is committed and reviewed like any other file. It must not be
+	// able to name a host to send the user's credentials to.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	var sawAuth []string
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = append(sawAuth, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer foreign.Close()
+
+	authorized := false
+	f := &Fetcher{
+		Client: foreign.Client(),
+		Authorize: func(_ context.Context, req *http.Request) error {
+			authorized = true
+			req.Header.Set("Authorization", "Bearer super-secret")
+			return nil
+		},
+	}
+
+	_, err := f.Load(context.Background(), "orders", env(t, "https://api.internal", foreign.URL+"/spec.json"))
+
+	if err == nil {
+		t.Fatal("Load succeeded, want a refusal")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitBlocked {
+		t.Errorf("exit code = %d, want %d", got, output.ExitBlocked)
+	}
+	if authorized {
+		t.Error("credentials were resolved for a host that is not the API")
+	}
+	for _, header := range sawAuth {
+		if header != "" {
+			t.Errorf("the foreign host received %q", header)
+		}
+	}
+}
+
+func TestCredentialsStillGoToTheAPIsOwnSpecEndpoint(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(minimalSpec))
+	}))
+	defer srv.Close()
+
+	f := &Fetcher{
+		Client: srv.Client(),
+		Authorize: func(_ context.Context, req *http.Request) error {
+			req.Header.Set("Authorization", "Bearer ok")
+			return nil
+		},
+	}
+
+	got, err := f.Load(context.Background(), "orders", env(t, srv.URL, "/spec.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(got.Data) != minimalSpec {
+		t.Errorf("Data = %q, want the spec", got.Data)
+	}
+}
+
+func TestASpecEndpointThatRefusesTheCredentialsIsAnAuthError(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	f := &Fetcher{
+		Client:    srv.Client(),
+		Authorize: func(_ context.Context, req *http.Request) error { return nil },
+	}
+
+	_, err := f.Load(context.Background(), "orders", env(t, srv.URL, "/spec.json"))
+	if err == nil {
+		t.Fatal("Load succeeded against a 403")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitAuth {
+		t.Errorf("exit code = %d, want %d", got, output.ExitAuth)
+	}
+}
+
+func TestATransientFailureIsNotRememberedAsNoSpec(t *testing.T) {
+	// An agent restarting a backend hits this: a 503 must not lock blip out for
+	// the whole negative-cache window.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	ready := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if r.URL.Path != "/openapi/v1.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(minimalSpec))
+	}))
+	defer srv.Close()
+
+	f := &Fetcher{Client: srv.Client()}
+	e := env(t, srv.URL, "")
+
+	if _, err := f.Load(context.Background(), "orders", e); err == nil {
+		t.Fatal("Load succeeded while the service was starting")
+	}
+
+	ready = true
+	got, err := f.Load(context.Background(), "orders", e)
+	if err != nil {
+		t.Fatalf("Load once the service was up: %v", err)
+	}
+	if string(got.Data) != minimalSpec {
+		t.Errorf("Data = %q, want the spec", got.Data)
+	}
+}
+
+func TestA304RefreshesWhatIsRemembered(t *testing.T) {
+	srv := newSpecServer(t, "/openapi/v1.json")
+	f, _ := newFetcher(t, srv)
+	e := env(t, srv.URL, "")
+
+	if _, err := f.Load(context.Background(), "orders", e); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.Load(context.Background(), "orders", e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusRevalidated {
+		t.Fatalf("Status = %q, want %q", got.Status, StatusRevalidated)
+	}
+
+	dir, err := CacheDir("orders", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, meta := readCache(dir)
+	if meta.ETag != `"v1"` {
+		t.Errorf("persisted etag = %q, want the revalidated one", meta.ETag)
+	}
+	if meta.FetchedAt.IsZero() {
+		t.Error("the revalidation was not written back to disk")
 	}
 }

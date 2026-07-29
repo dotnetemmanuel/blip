@@ -1,15 +1,13 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/dotnetemmanuel/blip/internal/output"
 )
 
 func usageError(format string, args ...any) error {
-	return output.WithCode(fmt.Errorf(format, args...), output.ExitUsage)
+	return output.Usagef(format, args...)
 }
 
 // usageArgs tags cobra's argument-count errors as usage errors, which is what

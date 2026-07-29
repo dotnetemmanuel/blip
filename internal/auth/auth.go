@@ -36,7 +36,7 @@ type Authenticator interface {
 }
 
 func authError(format string, args ...any) error {
-	return output.WithCode(fmt.Errorf(format, args...), output.ExitAuth)
+	return output.Authf(format, args...)
 }
 
 // New builds an authenticator for a resolved profile. client is used only by

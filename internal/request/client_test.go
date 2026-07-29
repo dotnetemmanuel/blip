@@ -242,3 +242,112 @@ func TestClientTimeoutPrefersTheFlag(t *testing.T) {
 		t.Errorf("Timeout = %v, want the environment's %v", client.Timeout, env.Timeout)
 	}
 }
+
+func TestRedirectToAnotherHostIsRefused(t *testing.T) {
+	// Go only strips Authorization across hostnames, which leaves a custom header
+	// credential, a port change and a scheme downgrade all forwarded.
+	var stolen []string
+	thief := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stolen = append(stolen, r.Header.Get("X-Api-Key"))
+		_, _ = w.Write([]byte(`{"stolen":true}`))
+	}))
+	defer thief.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, thief.URL+"/stolen", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	env := environment(t, origin.URL)
+	client, err := NewClient(env, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &Request{Method: "GET", Path: "/x", Header: http.Header{"X-Api-Key": {"secret"}}}
+	httpReq, err := req.HTTPRequest(t.Context(), env.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Do(client, httpReq)
+
+	if err == nil {
+		t.Fatal("Do followed a redirect to another host")
+	}
+	if !strings.Contains(err.Error(), "leave the configured host") {
+		t.Errorf("err = %q, want it to explain the refusal", err)
+	}
+	for _, got := range stolen {
+		if got != "" {
+			t.Errorf("the other host received the credential %q", got)
+		}
+	}
+	if output.ExitCodeFor(err) != output.ExitTransport {
+		t.Errorf("exit code = %d, want %d", output.ExitCodeFor(err), output.ExitTransport)
+	}
+}
+
+func TestRedirectOnTheSameHostIsFollowed(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.Path)
+		if r.URL.Path == "/from" {
+			http.Redirect(w, r, "/to", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	env := environment(t, srv.URL)
+	client, err := NewClient(env, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpReq, err := (&Request{Method: "GET", Path: "/from"}).HTTPRequest(t.Context(), env.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := Do(client, httpReq)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if string(resp.Body) != `{"ok":true}` {
+		t.Errorf("body = %q, want the redirect followed", resp.Body)
+	}
+	if len(seen) != 2 {
+		t.Errorf("server saw %v, want both hops", seen)
+	}
+}
+
+func TestStrictClientVerifiesTLSEvenWhenTheEnvironmentIsInsecure(t *testing.T) {
+	// insecure is granted for a localhost development certificate on the API. It
+	// must not follow a client secret to an identity provider somewhere else.
+	ca := newCA(t)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"x"}`))
+	}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{ca.issue(t, "idp", true).tlsCert}}
+	srv.StartTLS()
+	defer srv.Close()
+
+	env := environment(t, srv.URL)
+	env.Insecure = true
+
+	lax, err := NewClient(env, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lax.Get(srv.URL); err != nil {
+		t.Fatalf("the API client should honour insecure: %v", err)
+	}
+
+	strict, err := NewStrictClient(env, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strict.Get(srv.URL); err == nil {
+		t.Fatal("the strict client accepted an unverifiable certificate")
+	}
+}

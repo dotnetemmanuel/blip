@@ -1,7 +1,6 @@
 package build
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/dotnetemmanuel/blip/internal/output"
@@ -25,17 +24,14 @@ func (a *API) AddRoutes(routes []Route) error {
 		group := kebab(r.Group)
 
 		if group == "" && Reserved[name] {
-			return output.WithCode(fmt.Errorf(
-				"route %q collides with a blip command; rename it or give it a group", r.Name), output.ExitConfig)
+			return output.Configf("route %q collides with a blip command; rename it or give it a group", r.Name)
 		}
 		if group != "" && Reserved[group] {
-			return output.WithCode(fmt.Errorf(
-				"route group %q collides with a blip command; rename it", r.Group), output.ExitConfig)
+			return output.Configf("route group %q collides with a blip command; rename it", r.Group)
 		}
 		if existing := a.findExact(group, name); existing != nil {
-			return output.WithCode(fmt.Errorf(
-				"route %q collides with the generated command for %s %s; rename it or give it a group",
-				r.Name, existing.Method, existing.Path), output.ExitConfig)
+			return output.Configf("route %q collides with the generated command for %s %s; rename it or give it a group",
+				r.Name, existing.Method, existing.Path)
 		}
 
 		a.Operations = append(a.Operations, &Operation{

@@ -34,20 +34,20 @@ func newRawCommand(rt *Runtime) *cobra.Command {
   blip raw POST /api/orders --data @order.json --dry-run
   blip raw POST /api/orders --field sku=A1 --field qty:=3 --yes`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := call{Method: args[0], Path: args[1]}
+			req := &request.Request{Method: args[0], Path: args[1]}
 
 			var err error
-			if c.Query, err = request.ParseQuery(queries); err != nil {
+			if req.Query, err = request.ParseQuery(queries); err != nil {
 				return err
 			}
-			if c.Header, err = request.ParseHeaders(headers); err != nil {
+			if req.Header, err = request.ParseHeaders(headers); err != nil {
 				return err
 			}
-			if c.Body, err = rt.body(data, fields); err != nil {
+			if req.Body, err = rt.body(data, fields); err != nil {
 				return err
 			}
 
-			return rt.send(cmd.Context(), c)
+			return rt.send(cmd.Context(), req, nil)
 		},
 	}
 

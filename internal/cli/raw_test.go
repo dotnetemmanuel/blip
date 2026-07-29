@@ -15,11 +15,12 @@ import (
 
 // capture is what the stub server saw.
 type capture struct {
-	Method string
-	Path   string
-	Query  string
-	Header http.Header
-	Body   string
+	Method     string
+	Path       string
+	RequestURI string
+	Query      string
+	Header     http.Header
+	Body       string
 }
 
 type stub struct {
@@ -40,11 +41,12 @@ func newStub(t *testing.T) *stub {
 		}
 		body, _ := io.ReadAll(r.Body)
 		s.last = capture{
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Query:  r.URL.RawQuery,
-			Header: r.Header.Clone(),
-			Body:   string(body),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			RequestURI: r.RequestURI,
+			Query:      r.URL.RawQuery,
+			Header:     r.Header.Clone(),
+			Body:       string(body),
 		}
 		for k, v := range s.header {
 			w.Header().Set(k, v)
@@ -324,25 +326,84 @@ func TestDryRunWorksWithoutYesOnAMutation(t *testing.T) {
 	}
 }
 
-func TestVerboseDryRunNeverPrintsASecret(t *testing.T) {
-	srv := newStub(t)
-	f := liveFixture(t, srv, "")
-	f.writeCredentials(t, `
+func TestVerboseNeverPrintsASecret(t *testing.T) {
+	// --dry-run returns before the verbose block, so both paths need covering:
+	// the dry run is the one an agent reads, the live send is the one a human does.
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"dry run", []string{"--dry-run", "--verbose", "--include-headers"}},
+		{"live request", []string{"--yes", "--verbose", "--include-headers"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newStub(t)
+			f := liveFixture(t, srv, "")
+			f.writeCredentials(t, `
 [orders-dev]
 type = "basic"
 username = "svc"
 password = "hunter2-secret"
 `)
 
-	got := f.run(t, "raw", "POST", "/api/orders", "--data", `{"password":"hunter2-secret"}`,
-		"--dry-run", "--verbose", "--include-headers")
+			args := append([]string{"raw", "POST", "/api/orders?token=hunter2-secret",
+				"--data", `{"password":"hunter2-secret"}`}, tt.args...)
+			got := f.runWith(t, "", false, args...)
 
-	combined := got.stdout + got.stderr
-	if strings.Contains(combined, "hunter2-secret") {
-		t.Errorf("output leaked the password:\n%s", combined)
+			combined := got.stdout + got.stderr
+			if strings.Contains(combined, "hunter2-secret") {
+				t.Errorf("output leaked the password:\n%s", combined)
+			}
+			if strings.Contains(combined, "c3ZjOmh1bnRlcjItc2VjcmV0") {
+				t.Errorf("output leaked the encoded basic credential:\n%s", combined)
+			}
+			// Without a positive assertion this test passes when nothing is printed.
+			// A dry run renders the headers on stdout, a live send on stderr.
+			if !strings.Contains(combined, "Authorization") {
+				t.Errorf("output = %q, want the request headers to have been rendered", combined)
+			}
+			if !strings.Contains(combined, "<redacted>") {
+				t.Errorf("output = %q, want the redaction visible", combined)
+			}
+		})
 	}
-	if strings.Contains(combined, "c3ZjOmh1bnRlcjItc2VjcmV0") {
-		t.Errorf("output leaked the encoded basic credential:\n%s", combined)
+}
+
+func TestSafetyRulesCoverEveryMutatingVerb(t *testing.T) {
+	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE", "PURGE"} {
+		t.Run(method, func(t *testing.T) {
+			srv := newStub(t)
+			f := liveFixture(t, srv, "")
+
+			got := f.runWith(t, "", false, "raw", method, "/api/orders/1", "--data", "{}")
+
+			if got.code != output.ExitBlocked {
+				t.Errorf("exit = %d, want %d (%s)", got.code, output.ExitBlocked, got.stderr)
+			}
+			if srv.last.Method != "" {
+				t.Errorf("server saw %s, want nothing sent", srv.last.Method)
+			}
+		})
+	}
+}
+
+func TestReadonlyBlocksEveryMutatingVerb(t *testing.T) {
+	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+		t.Run(method, func(t *testing.T) {
+			srv := newStub(t)
+			f := liveFixture(t, srv, "\n[env.prod]\nbase_url = \""+srv.URL+"\"\nreadonly = true\n")
+
+			got := f.runWith(t, "", false, "raw", method, "/api/orders/1", "--env", "prod", "--yes", "--data", "{}")
+
+			if got.code != output.ExitBlocked {
+				t.Errorf("exit = %d, want %d", got.code, output.ExitBlocked)
+			}
+			if srv.last.Method != "" {
+				t.Errorf("server saw %s, want nothing sent", srv.last.Method)
+			}
+		})
 	}
 }
 

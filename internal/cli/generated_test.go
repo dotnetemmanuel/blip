@@ -44,11 +44,12 @@ func newAPIStub(t *testing.T, specFile string) *apiStub {
 			_, _ = r.Body.Read(body)
 		}
 		s.last = capture{
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Query:  r.URL.RawQuery,
-			Header: r.Header.Clone(),
-			Body:   string(body),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			RequestURI: r.RequestURI,
+			Query:      r.URL.RawQuery,
+			Header:     r.Header.Clone(),
+			Body:       string(body),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(s.status)

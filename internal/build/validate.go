@@ -38,11 +38,6 @@ func (o *Operation) ValidateResponse(status int, body []byte) error {
 		o.FullName(), status, summarize(err))
 }
 
-// HasResponseSchema reports whether the spec describes the body for a status.
-func (o *Operation) HasResponseSchema(status int) bool {
-	return o.responseSchema(status) != nil
-}
-
 func (o *Operation) responseSchema(status int) *openapi3.SchemaRef {
 	if o.responses == nil {
 		return nil

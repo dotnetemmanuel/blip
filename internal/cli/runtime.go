@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 
@@ -256,11 +257,42 @@ func (rt *Runtime) buildAuthenticator(ctx context.Context) (auth.Authenticator, 
 		return nil, err
 	}
 
-	client, err := rt.Client()
+	client, err := rt.tokenClient(resolved.TokenURL)
 	if err != nil {
 		return nil, err
 	}
 	return auth.New(resolved, client)
+}
+
+// tokenClient is the client an oauth2_cc profile uses to reach its identity
+// provider. insecure was granted for a local development certificate on the API,
+// so it only carries over when the token endpoint is local too.
+func (rt *Runtime) tokenClient(tokenURL string) (*http.Client, error) {
+	env, err := rt.Env()
+	if err != nil {
+		return nil, err
+	}
+	if tokenURL == "" || config.IsLocalHost(hostOf(tokenURL)) {
+		return rt.Client()
+	}
+	return request.NewStrictClient(env, rt.Globals.Timeout)
+}
+
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// Redact removes any secret blip has already resolved from a message on its way
+// out. It never triggers resolution: printing an error must not reach a vault.
+func (rt *Runtime) Redact(s string) string {
+	if rt.auth == nil {
+		return s
+	}
+	return output.NewRedactor(rt.auth.Secrets()).String(s)
 }
 
 // stderrFile lets a vault command write its prompts where the user can see them,

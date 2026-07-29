@@ -556,3 +556,29 @@ func TestSchemaTypeWithNoType(t *testing.T) {
 		t.Errorf("schemaType(nil) = %q, want string", got)
 	}
 }
+
+func TestNumberingNeverHandsOutTheSameNameTwice(t *testing.T) {
+	// An operationId that kebabs to an already-numbered name used to collide with
+	// the number a derived name had been given.
+	spec := `{"openapi":"3.0.1","info":{"title":"x","version":"1"},"paths":{
+		"/api/things":{"get":{"tags":["things"],"responses":{"200":{"description":"OK"}}}},
+		"/things":{"get":{"tags":["things"],"responses":{"200":{"description":"OK"}}}},
+		"/zzz/things":{"get":{"tags":["things"],"operationId":"things_get_2","responses":{"200":{"description":"OK"}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]string{}
+	for _, op := range api.Operations {
+		key := op.Group + " " + op.Name
+		if first, dup := seen[key]; dup {
+			t.Errorf("%q is shared by %s and %s %s", key, first, op.Method, op.Path)
+		}
+		seen[key] = op.Method + " " + op.Path
+	}
+	if len(seen) != 3 {
+		t.Errorf("distinct names = %d, want 3: %v", len(seen), seen)
+	}
+}

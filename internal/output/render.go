@@ -90,7 +90,7 @@ func (r *Renderer) writeHeaders(status int, header http.Header) {
 
 // Summary is the one-line stderr note that accompanies a non-2xx response.
 func (r *Renderer) Summary(method, url string, status int) {
-	fmt.Fprintf(r.Stderr, "blip: %s %s -> %d %s\n", method, url, status, http.StatusText(status))
+	fmt.Fprintf(r.Stderr, "blip: %s %s -> %d %s\n", method, r.Redactor.String(url), status, http.StatusText(status))
 }
 
 func sortedNames(header http.Header) []string {
@@ -122,7 +122,7 @@ func ExitCodeForStatus(status int) int {
 // reads, so it stays stable: request line, environment, headers, blank line, body.
 func (r *Renderer) DryRun(method, url, envName string, header http.Header, body []byte) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s\n", strings.ToUpper(method), url)
+	fmt.Fprintf(&b, "%s %s\n", strings.ToUpper(method), r.Redactor.String(url))
 	fmt.Fprintf(&b, "env: %s\n", envName)
 	for _, name := range sortedNames(header) {
 		for _, v := range header[name] {

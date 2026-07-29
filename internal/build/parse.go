@@ -35,7 +35,7 @@ func Parse(data []byte) (*API, error) {
 
 	doc, err := loader.LoadFromData(data)
 	if err != nil {
-		return nil, output.WithCode(fmt.Errorf("parsing the spec: %w", err), output.ExitConfig)
+		return nil, output.Configf("parsing the spec: %w", err)
 	}
 
 	api := &API{}

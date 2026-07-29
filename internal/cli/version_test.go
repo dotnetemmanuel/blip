@@ -2,17 +2,28 @@ package cli
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dotnetemmanuel/blip/internal/output"
 )
 
+// run keeps config discovery, the credential store and the cache inside the
+// test's own directories. Without that, a .blip.toml anywhere above the repo
+// would make these tests read real credentials and make real requests.
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Setenv("BLIP_ENV", "")
+
 	out := &bytes.Buffer{}
 	errOut := &bytes.Buffer{}
-	code = Execute(args, out, errOut)
+	rt := &Runtime{Globals: &Globals{}, Stdout: out, Stderr: errOut, Dir: dir}
+	rt.Globals.prescan(args)
+	code = Run(rt, args)
 	return code, out.String(), errOut.String()
 }
 

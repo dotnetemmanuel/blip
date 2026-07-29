@@ -185,8 +185,9 @@ overrides both.
 Unknown keys are an error rather than being ignored, so a typo like `read_only` cannot
 silently disable the guard you meant to switch on.
 
-`insecure = true` is rejected unless the host is loopback. Skipping TLS verification
-against a real host is not something a committed file should be able to arrange.
+`insecure = true` is rejected unless the host is loopback, and it applies only to the API
+itself. An `oauth2_cc` token endpoint on another host is always verified, because the
+exemption was granted for a local development certificate, not for an identity provider.
 
 A `[[route]]` with no `group` becomes a top-level command (`blip health`); give it a
 `group` to nest it. Routes merge into the generated tree, and work with no spec at all.
@@ -247,8 +248,10 @@ gives no id. Those names do not move when tags or derivation change, so they are
 thing to put in a script.
 
 `blip raw` applies the base URL, credentials, TLS settings and safety rules but needs no
-spec. A path must start with `/`; blip will not send your production credentials to
-another host.
+spec. A path must start with `/`, and blip will not send your credentials to another host:
+a path argument cannot escape the operation it names, a redirect that changes host is
+refused rather than followed, and a `spec_url` on a different host is fetched without
+credentials.
 
 Generated `--help` carries the operation's summary, description and each parameter's
 description straight from the spec.
@@ -296,7 +299,14 @@ that means a real request to the token endpoint, though never to the API itself.
 
 `Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` are redacted in all
 verbose and dry-run output, and every resolved secret is redacted by value wherever it
-appears, including inside a request body.
+appears: in a request body, in a query string, in the summary line and in an error
+message. Redaction is literal substring matching, so a secret that the API re-encodes
+before echoing it back is not caught.
+
+A parameter in the spec can never take over one of blip's own flags. A query parameter
+called `dry-run` or `output` is exposed as `--query-dry-run` and `--query-output`, and the
+rename is shown in `--help`, because a spec that could claim `--dry-run` could turn the
+safety net off.
 
 ### Response validation
 

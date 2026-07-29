@@ -22,9 +22,9 @@ type Gate struct {
 	Confirm     Confirmer
 }
 
-// IsSafe reports whether a method only reads. Everything else is treated as a
+// isSafe reports whether a method only reads. Everything else is treated as a
 // mutation, including verbs blip has never heard of.
-func IsSafe(method string) bool {
+func isSafe(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
@@ -33,13 +33,13 @@ func IsSafe(method string) bool {
 }
 
 func blocked(format string, args ...any) error {
-	return output.WithCode(fmt.Errorf(format, args...), output.ExitBlocked)
+	return output.Blockedf(format, args...)
 }
 
 // Check runs the rules in order: readonly first, because no flag may override it.
 func (g Gate) Check(method, url, envName string) error {
 	method = strings.ToUpper(method)
-	if IsSafe(method) {
+	if isSafe(method) {
 		return nil
 	}
 

@@ -3,7 +3,6 @@ package config
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -76,7 +75,7 @@ type Environment struct {
 }
 
 func configError(format string, args ...any) error {
-	return output.WithCode(fmt.Errorf(format, args...), output.ExitConfig)
+	return output.Configf(format, args...)
 }
 
 // Discover walks up from start looking for a config file. The first hit wins.
@@ -246,7 +245,7 @@ func (c *Config) buildEnvironment(name string) (*Environment, error) {
 		}
 	}
 
-	if raw.Insecure && !isLocalHost(base.Hostname()) {
+	if raw.Insecure && !IsLocalHost(base.Hostname()) {
 		return nil, configError("%s: env.%s has insecure = true but base_url host %q is not local; "+
 			"TLS verification can only be skipped against localhost, 127.0.0.1 or ::1",
 			c.Path, name, base.Hostname())
@@ -296,7 +295,9 @@ func parseBaseURL(envName, raw, configPath string) (*url.URL, error) {
 	return u, nil
 }
 
-func isLocalHost(host string) bool {
+// IsLocalHost reports whether a host is loopback, and so whether relaxing TLS
+// against it is a local development concern rather than a real exposure.
+func IsLocalHost(host string) bool {
 	switch strings.ToLower(host) {
 	case "localhost", "127.0.0.1", "::1":
 		return true

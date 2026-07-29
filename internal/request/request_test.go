@@ -287,3 +287,60 @@ func TestParseQuery(t *testing.T) {
 		t.Errorf("ParseQuery = %q", got)
 	}
 }
+
+func TestResolveURLKeepsAnEscapedSegment(t *testing.T) {
+	// Discarding RawPath here would decode %2F back into a separator and let a
+	// path argument address a different endpoint.
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"escaped slash", "/api/orders/a%2Fb", "https://api.test/api/orders/a%2Fb"},
+		{"escaped traversal", "/api/orders/..%2F..%2Fadmin", "https://api.test/api/orders/..%2F..%2Fadmin"},
+		{"nothing to escape", "/api/orders/7", "https://api.test/api/orders/7"},
+		{"space stays encoded", "/api/orders/a%20b", "https://api.test/api/orders/a%20b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveURL(mustParse(t, "https://api.test"), tt.path, nil)
+			if err != nil {
+				t.Fatalf("ResolveURL: %v", err)
+			}
+			if got.String() != tt.want {
+				t.Errorf("ResolveURL = %q, want %q", got, tt.want)
+			}
+			if got.EscapedPath() != strings.TrimPrefix(tt.want, "https://api.test") {
+				t.Errorf("EscapedPath = %q, want the encoding preserved", got.EscapedPath())
+			}
+		})
+	}
+}
+
+func TestParseHeadersKeepsAValueContainingAColon(t *testing.T) {
+	header, err := ParseHeaders([]string{"X-Callback=https://example.com/cb", "X-Trace: a:b:c"})
+	if err != nil {
+		t.Fatalf("ParseHeaders: %v", err)
+	}
+
+	if got := header.Get("X-Callback"); got != "https://example.com/cb" {
+		t.Errorf("X-Callback = %q, want the URL intact", got)
+	}
+	if got := header.Get("X-Trace"); got != "a:b:c" {
+		t.Errorf("X-Trace = %q, want only the first separator used", got)
+	}
+}
+
+func TestParseHeadersRejectsAnInvalidName(t *testing.T) {
+	for _, raw := range []string{"nonsense", "=value", "bad name: v", "a/b: v"} {
+		_, err := ParseHeaders([]string{raw})
+		if err == nil {
+			t.Errorf("ParseHeaders(%q) succeeded, want a usage error", raw)
+			continue
+		}
+		if output.ExitCodeFor(err) != output.ExitUsage {
+			t.Errorf("ParseHeaders(%q) exit code = %d, want %d", raw, output.ExitCodeFor(err), output.ExitUsage)
+		}
+	}
+}

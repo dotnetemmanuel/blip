@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+
+	"github.com/dotnetemmanuel/blip/internal/output"
 )
 
 // Globals are the flags that apply to every command.
@@ -23,12 +25,6 @@ type Globals struct {
 	Strict         bool
 }
 
-const (
-	OutputJSON   = "json"
-	OutputRaw    = "raw"
-	OutputStatus = "status"
-)
-
 func (g *Globals) register(flags *pflag.FlagSet) {
 	flags.StringVar(&g.ConfigPath, "config", g.ConfigPath, "path to .blip.toml (default: nearest one walking up from cwd)")
 	flags.StringVar(&g.Env, "env", g.Env, "environment to use (default: BLIP_ENV, then default_env)")
@@ -36,7 +32,7 @@ func (g *Globals) register(flags *pflag.FlagSet) {
 	flags.BoolVar(&g.Refresh, "refresh", g.Refresh, "revalidate the cached spec before running")
 	flags.BoolVar(&g.Offline, "offline", g.Offline, "never touch the network for the spec; fail if the cache is cold")
 	flags.DurationVar(&g.Timeout, "timeout", g.Timeout, "request timeout, overriding the environment's")
-	flags.StringVar(&g.Output, "output", OutputJSON, "output mode: json, raw or status")
+	flags.StringVar(&g.Output, "output", output.ModeJSON, "output mode: json, raw or status")
 	flags.BoolVar(&g.IncludeHeaders, "include-headers", g.IncludeHeaders, "write response headers to stderr")
 	flags.BoolVarP(&g.Verbose, "verbose", "v", g.Verbose, "explain what is being sent, secrets redacted")
 	flags.BoolVar(&g.DryRun, "dry-run", g.DryRun, "print the resolved request and exit without sending")

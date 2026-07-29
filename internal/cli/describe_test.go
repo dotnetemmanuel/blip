@@ -22,16 +22,20 @@ func TestDescribeCompactIsStableAndComplete(t *testing.T) {
 		t.Errorf("describe --compact drifted between runs:\n%s\n%s", first.stdout, second.stdout)
 	}
 
-	lines := strings.Split(strings.TrimSpace(first.stdout), "\n")
-	if len(lines) != 8 {
-		t.Errorf("lines = %d, want one per operation (8):\n%s", len(lines), first.stdout)
+	// Every operation named, and nothing else: a count alone would let one
+	// disappear and another take its place.
+	want := []string{
+		"customers orders-get-by-customer-id", "healthz get",
+		"orders list", "orders create", "orders get", "orders delete-by-id",
+		"orders cancel", "orders lines-get-by-id-by-line-id",
 	}
-	for _, want := range []string{
-		"orders list", "orders get", "orders create", "orders cancel",
-		"orders delete-by-id", "customers orders-get-by-customer-id", "healthz get",
-	} {
-		if !strings.Contains(first.stdout, want) {
-			t.Errorf("compact output is missing %q:\n%s", want, first.stdout)
+	lines := strings.Split(strings.TrimSpace(first.stdout), "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("lines = %d, want %d:\n%s", len(lines), len(want), first.stdout)
+	}
+	for i, name := range want {
+		if !strings.HasPrefix(lines[i], name+" ") {
+			t.Errorf("line %d = %q, want it to start with %q", i, lines[i], name)
 		}
 	}
 }

@@ -91,7 +91,7 @@ func Run(rt *Runtime, args []string) int {
 	}
 
 	if msg := err.Error(); msg != "" {
-		fmt.Fprintf(rt.Stderr, "blip: %s\n", msg)
+		fmt.Fprintf(rt.Stderr, "blip: %s\n", rt.Redact(msg))
 	}
 	return output.ExitCodeFor(classify(err))
 }

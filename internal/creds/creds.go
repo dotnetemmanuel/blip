@@ -100,7 +100,7 @@ func (r *Resolved) SecretValues() []string {
 }
 
 func authError(format string, args ...any) error {
-	return output.WithCode(fmt.Errorf(format, args...), output.ExitAuth)
+	return output.Authf(format, args...)
 }
 
 // Load reads the credentials file at the default location.
@@ -117,7 +117,7 @@ func LoadFile(path string) (*Store, error) {
 	info, err := os.Stat(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return nil, output.WithCode(fmt.Errorf("%w at %s", ErrNoFile, path), output.ExitAuth)
+		return nil, output.Authf("%w at %s", ErrNoFile, path)
 	case err != nil:
 		return nil, authError("reading %s: %w", path, err)
 	}

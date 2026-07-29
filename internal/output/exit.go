@@ -1,7 +1,10 @@
 // Package output renders responses and diagnostics, and owns the exit-code contract.
 package output
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // The exit-code contract. A caller branches on these, so they never change meaning.
 const (
@@ -52,4 +55,17 @@ func ExitCodeFor(err error) int {
 		return coded.ExitCode()
 	}
 	return ExitInternal
+}
+
+// Constructors for the coded errors, so that every package tags failures the
+// same way and the contract stays readable from this one file.
+func Usagef(format string, args ...any) error  { return codedf(ExitUsage, format, args...) }
+func Configf(format string, args ...any) error { return codedf(ExitConfig, format, args...) }
+func Authf(format string, args ...any) error   { return codedf(ExitAuth, format, args...) }
+func Blockedf(format string, args ...any) error {
+	return codedf(ExitBlocked, format, args...)
+}
+
+func codedf(code int, format string, args ...any) error {
+	return WithCode(fmt.Errorf(format, args...), code)
 }

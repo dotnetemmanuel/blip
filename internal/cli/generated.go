@@ -5,8 +5,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/dotnetemmanuel/blip/internal/build"
 )
 
 // specless are the commands that must work with no spec at all, and so must
@@ -59,21 +57,8 @@ func attachGenerated(ctx context.Context, rt *Runtime, root *cobra.Command) erro
 		return err
 	}
 
-	deps := build.Deps{
-		Send: func(ctx context.Context, inv build.Invocation) error {
-			return rt.send(ctx, call{
-				Method:    inv.Operation.Method,
-				Path:      inv.Path,
-				Query:     inv.Query,
-				Header:    inv.Header,
-				Body:      inv.Body,
-				operation: inv.Operation,
-			})
-		},
-		Body: rt.body,
-	}
-
-	root.AddCommand(api.Commands(deps)...)
-	root.AddCommand(api.CallCommand(deps))
+	globals := root.PersistentFlags()
+	root.AddCommand(operationCommands(rt, api, globals)...)
+	root.AddCommand(newCallCommand(rt, api, globals))
 	return nil
 }
