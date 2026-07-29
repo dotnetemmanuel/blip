@@ -363,3 +363,19 @@ func TestTimeoutIsRead(t *testing.T) {
 		t.Errorf("Auth = %q, want orders-dev", env.Auth)
 	}
 }
+
+func TestClientCertMayNotClimbOutOfTheRepo(t *testing.T) {
+	// .blip.toml is committed and may come from a cloned repo, so it must not be
+	// able to walk to an identity kept elsewhere on the machine.
+	body := "name = \"o\"\n[env.dev]\nbase_url = \"https://x.test\"\n" +
+		"client_cert = \"../../../home/user/.certs/prod.pem\"\nclient_key = \"k.pem\"\n"
+
+	_, err := Load(writeConfig(t, t.TempDir(), ".blip.toml", body))
+
+	if err == nil {
+		t.Fatal("Load accepted a traversing certificate path")
+	}
+	if !strings.Contains(err.Error(), "climb out of the repo") {
+		t.Errorf("err = %q, want it to name the problem", err)
+	}
+}

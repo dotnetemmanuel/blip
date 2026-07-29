@@ -254,6 +254,11 @@ func (c *Config) buildEnvironment(name string) (*Environment, error) {
 	if (raw.ClientCert == "") != (raw.ClientKey == "") {
 		return nil, configError("%s: env.%s needs both client_cert and client_key, or neither", c.Path, name)
 	}
+	for _, p := range []string{raw.ClientCert, raw.ClientKey} {
+		if strings.Contains(p, "..") {
+			return nil, configError("%s: env.%s client certificate path %q may not climb out of the repo", c.Path, name, p)
+		}
+	}
 
 	return &Environment{
 		Name:       name,
