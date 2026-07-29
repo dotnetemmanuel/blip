@@ -17,7 +17,7 @@ import (
 
 // Flag names blip owns on every operation, over and above the globals. A spec
 // parameter that wants one of these is renamed rather than allowed to take it.
-var ownedFlags = []string{"data", "field", "query", "header"}
+var ownedFlags = []string{"data", "field", "query", "header", "help"}
 
 // operationCommands builds the group commands for an API, plus any top-level
 // commands declared routes contributed.

@@ -45,6 +45,11 @@ var ErrNoFile = errors.New("no credentials file")
 type Profile struct {
 	Type string `toml:"type"`
 
+	// Hosts pins this credential to the hosts it may be sent to. .blip.toml is
+	// committed and can come from anywhere, so without this a cloned repo picks
+	// both the destination and which of your secrets travels to it.
+	Hosts []string `toml:"hosts"`
+
 	Token        string `toml:"token"`
 	TokenCommand string `toml:"token_command"`
 
@@ -74,6 +79,7 @@ type Store struct {
 type Resolved struct {
 	Name     string
 	Kind     Kind
+	Hosts    []string
 	Token    string
 	Header   string
 	Value    string
@@ -221,6 +227,7 @@ func (s *Store) Resolve(ctx context.Context, name string, r *Resolver) (*Resolve
 	res := &Resolved{
 		Name:     name,
 		Kind:     Kind(p.Type),
+		Hosts:    p.Hosts,
 		Header:   p.Header,
 		TokenURL: p.TokenURL,
 		Audience: p.Audience,
@@ -310,17 +317,10 @@ func shellRunner(stdin, stderr *os.File) Runner {
 
 		if err := cmd.Run(); err != nil {
 			if msg := strings.TrimSpace(captured.String()); msg != "" {
-				return "", fmt.Errorf("%w: %s", err, firstLine(msg))
+				return "", fmt.Errorf("%w: %s", err, output.FirstLine(msg))
 			}
 			return "", err
 		}
 		return stdout.String(), nil
 	}
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
 }

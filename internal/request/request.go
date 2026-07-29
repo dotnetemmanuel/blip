@@ -46,6 +46,10 @@ func ResolveURL(base *url.URL, rawPath string, query url.Values) (*url.URL, erro
 		return nil, usageError("path %q is not a valid URL path: %v", rawPath, err)
 	}
 
+	if hasDotSegment(ref.EscapedPath()) {
+		return nil, usageError("path %q contains a .. segment, which would address a different endpoint", rawPath)
+	}
+
 	resolved := *base
 	resolved.Path = strings.TrimSuffix(base.Path, "/") + ref.Path
 
@@ -112,6 +116,9 @@ func (r *Request) HTTPRequest(ctx context.Context, base *url.URL) (*http.Request
 func Do(client *http.Client, req *http.Request) (*Response, error) {
 	resp, err := client.Do(req)
 	if err != nil {
+		if errors.Is(err, ErrRedirectRefused) {
+			return nil, output.WithCode(transportMessage(err), output.ExitBlocked)
+		}
 		return nil, output.WithCode(transportMessage(err), output.ExitTransport)
 	}
 	defer resp.Body.Close()
@@ -133,4 +140,26 @@ func transportMessage(err error) error {
 		return fmt.Errorf("%s %s failed: %w", urlErr.Op, urlErr.URL, urlErr.Err)
 	}
 	return err
+}
+
+// hasDotSegment reports whether a path can climb. Servers resolve dot segments,
+// so an argument carrying one reaches somewhere other than the operation named.
+func hasDotSegment(escaped string) bool {
+	for _, segment := range strings.Split(escaped, "/") {
+		if segment == ".." {
+			return true
+		}
+		// An encoded separator can hide a climb inside one segment, and some
+		// servers decode it before routing.
+		unescaped, err := url.PathUnescape(segment)
+		if err != nil {
+			continue
+		}
+		for _, part := range strings.Split(unescaped, "/") {
+			if part == ".." {
+				return true
+			}
+		}
+	}
+	return false
 }

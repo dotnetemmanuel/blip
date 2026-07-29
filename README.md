@@ -37,7 +37,7 @@ Download a binary from the [latest release](https://github.com/dotnetemmanuel/bl
 
 ```sh
 curl -fsSL -o blip https://github.com/dotnetemmanuel/blip/releases/latest/download/blip-linux-amd64
-chmod +x blip && mv blip ~/.local/bin/
+mkdir -p ~/.local/bin && chmod +x blip && mv blip ~/.local/bin/
 ```
 
 Swap `linux-amd64` for `linux-arm64`, `darwin-amd64` or `darwin-arm64`. Each release
@@ -224,9 +224,10 @@ overrides both.
 Unknown keys are an error rather than being ignored, so a typo like `read_only` cannot
 silently disable the guard you meant to switch on.
 
-`insecure = true` is rejected unless the host is loopback, and it applies only to the API
-itself. An `oauth2_cc` token endpoint on another host is always verified, because the
-exemption was granted for a local development certificate, not for an identity provider.
+`insecure = true` is rejected unless the host is loopback, and it applies only to the API's
+own origin. An `oauth2_cc` token endpoint or a `spec_url` on another host is always
+verified, because the exemption was granted for a local development certificate, not for
+somewhere else.
 
 A `[[route]]` with no `group` becomes a top-level command (`blip health`); give it a
 `group` to nest it. Routes merge into the generated tree, and work with no spec at all.
@@ -237,6 +238,7 @@ A `[[route]]` with no `group` becomes a top-level command (`blip health`); give 
 [orders-dev]
 type  = "bearer"
 token = "eyJ..."
+hosts = ["localhost", "api.example.internal"]
 
 [orders-prod]
 type                  = "oauth2_cc"
@@ -252,6 +254,13 @@ value_command = "op read op://work/legacy/key"
 ```
 
 Auth types: `none`, `bearer`, `header`, `basic`, `oauth2_cc`.
+
+**`hosts` pins a credential to the hosts it may be sent to, and blip refuses to send it
+anywhere else.** This matters because `.blip.toml` is committed and may come from a repo
+you merely cloned: without a pin, that file would choose both the destination and which of
+your secrets travels there. A profile with no `hosts` works against loopback, so local
+development needs no ceremony, but reaching a remote host without one is refused with the
+line to add.
 
 Every secret field has a `_command` variant (`token_command`, `client_secret_command`,
 `value_command`, `password_command`). blip runs the command through `sh` and uses its
@@ -288,10 +297,10 @@ gives no id. Those names do not move when tags or derivation change, so they are
 thing to put in a script.
 
 `blip raw` applies the base URL, credentials, TLS settings and safety rules but needs no
-spec. A path must start with `/`, and blip will not send your credentials to another host:
-a path argument cannot escape the operation it names, a redirect that changes host is
-refused rather than followed, and a `spec_url` on a different host is fetched without
-credentials.
+spec. A path must start with `/`, and blip will not send your credentials to another host: a
+path argument carrying a `..` segment is refused, a redirect that changes host or drops
+TLS is refused rather than followed, a `spec_url` on a different origin is fetched without
+credentials, and a profile only reaches the hosts it pins itself to.
 
 Generated `--help` carries the operation's summary, description and each parameter's
 description straight from the spec.
@@ -318,6 +327,9 @@ description straight from the spec.
 | 7 | 4xx other than 401/403, and any other non-2xx |
 | 8 | 5xx |
 | 9 | Response did not match the spec schema, under `--strict` |
+
+A refused redirect and an unpinned credential are both exit 5, not 6: they are blip
+declining to act, not the network failing.
 
 A non-2xx still prints the response body to stdout, with a one-line summary on stderr.
 The API's own error payload is usually the whole answer, so blip does not swallow it.
@@ -411,6 +423,12 @@ And pre-allow the tool so it does not prompt on every call:
 Permission rules prefix-match the whole command string, so a piped invocation such as
 `blip orders list | jq .` needs each subcommand allowed independently. That is part of why
 blip formats its own JSON rather than leaning on `jq`.
+
+Note what that rule grants: `Bash(blip:*)` allows every blip invocation, including
+`--config` and `--profile`, which choose a different service and a different credential.
+The `hosts` pin above is what actually bounds the damage, so set it on any profile that
+reaches a real host. The `CLAUDE.md` note `blip init` writes tells an agent not to pass
+`--env`, `--config` or `--profile`.
 
 ## What blip is not
 

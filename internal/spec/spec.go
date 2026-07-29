@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -65,7 +66,10 @@ type Meta struct {
 
 // Fetcher loads a spec, using the cache and the network according to the flags.
 type Fetcher struct {
-	Client  *http.Client
+	Client *http.Client
+	// Strict is used for any candidate that is not the API's own origin, so an
+	// insecure granted for a localhost dev certificate cannot follow it away.
+	Strict  *http.Client
 	Refresh bool
 	Offline bool
 	Warnf   func(format string, args ...any)
@@ -86,18 +90,23 @@ func (f *Fetcher) warn(format string, args ...any) {
 	}
 }
 
-// Probe reports which of the standard paths serves a spec, for scaffolding a
-// config before one exists. It does not cache anything.
-func Probe(ctx context.Context, client *http.Client, base *url.URL) (string, bool) {
+// Probe reports which of the given paths serves a spec, for scaffolding a config
+// before one exists. It does not cache anything.
+func Probe(ctx context.Context, client *http.Client, base *url.URL, paths []string) (string, bool) {
 	f := &Fetcher{Client: client}
 	env := &config.Environment{Name: "probe", BaseURL: base}
 
-	candidates, err := f.candidates(env, Meta{})
-	if err != nil {
-		return "", false
+	var candidates []string
+	for _, p := range paths {
+		u, err := resolveSpecURL(env, p)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, u)
 	}
+
 	for _, candidate := range candidates {
-		status, body, _, err := f.get(ctx, candidate, "", false)
+		status, body, _, err := f.get(ctx, candidate, "", false, base)
 		if err != nil || status != http.StatusOK || !looksLikeSpec(body) {
 			continue
 		}
@@ -109,11 +118,25 @@ func Probe(ctx context.Context, client *http.Client, base *url.URL) (string, boo
 // CacheDir is where the spec for one environment of one API is kept. The
 // environment is part of the key because dev and prod can serve different specs.
 func CacheDir(apiName, envName string) (string, error) {
-	dir, err := xdg.SpecCacheDir(apiName)
+	dir, err := xdg.SpecCacheDir(safeComponent(apiName))
 	if err != nil {
 		return "", configError("locating spec cache: %w", err)
 	}
-	return filepath.Join(dir, envName), nil
+	return filepath.Join(dir, safeComponent(envName)), nil
+}
+
+var unsafeInPath = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+// safeComponent keeps a name out of the rest of the filesystem. Both the API
+// name and the environment come from a committed .blip.toml, which can be a file
+// the user merely cloned.
+func safeComponent(name string) string {
+	cleaned := unsafeInPath.ReplaceAllString(name, "_")
+	cleaned = strings.TrimLeft(cleaned, ".")
+	if cleaned == "" {
+		return "unnamed"
+	}
+	return cleaned
 }
 
 // Load returns the spec for an environment, from cache or from the network.
@@ -150,14 +173,14 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 			etag = cachedMeta.ETag
 		}
 
-		status, body, meta, err := f.get(ctx, candidate, etag, false)
+		status, body, meta, err := f.get(ctx, candidate, etag, false, env.BaseURL)
 		if isUnauthorized(status) && f.Authorize != nil {
-			if !sameHost(candidate, env.BaseURL) {
+			if !sameOrigin(candidate, env.BaseURL) {
 				return nil, output.Blockedf(
-					"refusing to send credentials to %s: env.%s.spec_url points at a different host from base_url (%s)",
-					candidate, env.Name, env.BaseURL.Host)
+					"refusing to send credentials to %s: env.%s.spec_url is not the same origin as base_url (%s://%s)",
+					candidate, env.Name, env.BaseURL.Scheme, env.BaseURL.Host)
 			}
-			status, body, meta, err = f.get(ctx, candidate, etag, true)
+			status, body, meta, err = f.get(ctx, candidate, etag, true, env.BaseURL)
 			if err != nil {
 				// A credential that cannot be produced is an auth problem, not an
 				// unreachable host, and the code it carries has to survive.
@@ -227,6 +250,25 @@ func definitelyAbsent(status int) bool {
 	return status == http.StatusNotFound || status == http.StatusGone
 }
 
+// collapse folds repeats of one underlying failure, since probing four paths on
+// a host that is down says the same thing four times.
+func collapse(messages []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range messages {
+		reason := m
+		if i := strings.Index(m, " ("); i >= 0 {
+			reason = m[i:]
+		}
+		if seen[reason] {
+			continue
+		}
+		seen[reason] = true
+		out = append(out, m)
+	}
+	return out
+}
+
 func noSpecMarker(dir string) string { return filepath.Join(dir, "nospec") }
 
 // recentlyProbedInVain reports whether blip already probed this environment and
@@ -246,7 +288,7 @@ func rememberNoSpec(dir string) {
 func (f *Fetcher) noSpecError(env *config.Environment, reachable, unreachable []string) error {
 	if len(reachable) == 0 && len(unreachable) > 0 {
 		return output.WithCode(fmt.Errorf("could not reach %s to load a spec: %s",
-			env.BaseURL, strings.Join(unreachable, "; ")), output.ExitTransport)
+			env.BaseURL, strings.Join(collapse(unreachable), "; ")), output.ExitTransport)
 	}
 	return configError("no OpenAPI spec found for env.%s; tried %s. Set spec_url, or declare [[route]] entries and use them without a spec",
 		env.Name, strings.Join(append(reachable, unreachable...), "; "))
@@ -301,18 +343,30 @@ func isUnauthorized(status int) bool {
 	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
-// sameHost reports whether a spec URL lives on the API's own host. Credentials
-// are only ever offered to that host: .blip.toml is committed and reviewed like
-// any other file, and it must not be able to name somewhere else to send them.
-func sameHost(rawURL string, base *url.URL) bool {
+// sameOrigin reports whether a spec URL lives on the API's own origin, scheme
+// included. Credentials are only offered there: .blip.toml is committed and
+// reviewed like any other file, and it must not be able to name somewhere else
+// to send them, nor drop the request to plaintext on the way.
+func sameOrigin(rawURL string, base *url.URL) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(u.Host, base.Host)
+	return strings.EqualFold(u.Host, base.Host) && strings.EqualFold(u.Scheme, base.Scheme)
 }
 
-func (f *Fetcher) get(ctx context.Context, rawURL, etag string, authorize bool) (int, []byte, Meta, error) {
+// clientFor keeps a relaxed TLS posture to the origin it was granted for.
+func (f *Fetcher) clientFor(rawURL string, base *url.URL) *http.Client {
+	if base != nil && !sameOrigin(rawURL, base) && f.Strict != nil {
+		return f.Strict
+	}
+	if f.Client != nil {
+		return f.Client
+	}
+	return http.DefaultClient
+}
+
+func (f *Fetcher) get(ctx context.Context, rawURL, etag string, authorize bool, base *url.URL) (int, []byte, Meta, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, nil, Meta{}, err
@@ -327,10 +381,7 @@ func (f *Fetcher) get(ctx context.Context, rawURL, etag string, authorize bool) 
 		}
 	}
 
-	client := f.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := f.clientFor(rawURL, base)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, Meta{}, err

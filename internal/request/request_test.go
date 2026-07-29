@@ -297,7 +297,6 @@ func TestResolveURLKeepsAnEscapedSegment(t *testing.T) {
 		want string
 	}{
 		{"escaped slash", "/api/orders/a%2Fb", "https://api.test/api/orders/a%2Fb"},
-		{"escaped traversal", "/api/orders/..%2F..%2Fadmin", "https://api.test/api/orders/..%2F..%2Fadmin"},
 		{"nothing to escape", "/api/orders/7", "https://api.test/api/orders/7"},
 		{"space stays encoded", "/api/orders/a%20b", "https://api.test/api/orders/a%20b"},
 	}
@@ -341,6 +340,36 @@ func TestParseHeadersRejectsAnInvalidName(t *testing.T) {
 		}
 		if output.ExitCodeFor(err) != output.ExitUsage {
 			t.Errorf("ParseHeaders(%q) exit code = %d, want %d", raw, output.ExitCodeFor(err), output.ExitUsage)
+		}
+	}
+}
+
+func TestResolveURLRefusesADotSegment(t *testing.T) {
+	// Servers resolve dot segments, so an argument carrying one reaches a
+	// different endpoint than the operation names.
+	for _, path := range []string{
+		"/api/orders/..",
+		"/api/orders/../../admin",
+		"/api/orders/%2e%2e/admin",
+		"/api/orders/..%2Fadmin",
+	} {
+		t.Run(path, func(t *testing.T) {
+			_, err := ResolveURL(mustParse(t, "https://api.test"), path, nil)
+
+			if err == nil {
+				t.Fatalf("ResolveURL(%q) succeeded, want a refusal", path)
+			}
+			if output.ExitCodeFor(err) != output.ExitUsage {
+				t.Errorf("exit code = %d, want %d", output.ExitCodeFor(err), output.ExitUsage)
+			}
+		})
+	}
+}
+
+func TestResolveURLAllowsADotInsideASegment(t *testing.T) {
+	for _, path := range []string{"/api/orders/a..b", "/api/files/report.pdf", "/api/v1.2/orders"} {
+		if _, err := ResolveURL(mustParse(t, "https://api.test"), path, nil); err != nil {
+			t.Errorf("ResolveURL(%q) = %v, want it allowed", path, err)
 		}
 	}
 }

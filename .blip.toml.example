@@ -1,5 +1,6 @@
-# Copy to .blip.toml at your repo root and commit it.
-# Credentials never live here: they go in ~/.config/blip/credentials.toml.
+# Copy to .blip.toml at your repo root and commit it, or run: blip init <base-url>
+# Credentials never live here: they go in ~/.config/blip/credentials.toml, where each
+# profile should pin the hosts it may be sent to with hosts = [...].
 
 name = "orders"          # cache key and display name, required
 default_env = "dev"

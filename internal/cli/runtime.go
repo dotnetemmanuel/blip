@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/dotnetemmanuel/blip/internal/auth"
 	"github.com/dotnetemmanuel/blip/internal/build"
@@ -51,9 +52,9 @@ type Runtime struct {
 	auth     auth.Authenticator
 	authErr  error
 
-	clientOnce sync.Once
-	client     *http.Client
-	clientErr  error
+	client        *http.Client
+	clientTimeout time.Duration
+	clientErr     error
 
 	specOnce sync.Once
 	spec     *spec.Spec
@@ -107,16 +108,19 @@ func (rt *Runtime) Env() (*config.Environment, error) {
 	return rt.env, rt.envErr
 }
 
-// Client returns the HTTP client for the resolved environment.
+// Client returns the HTTP client for the resolved environment. The tree is built
+// before cobra parses flags, so the first caller cannot be allowed to fix the
+// timeout for everyone.
 func (rt *Runtime) Client() (*http.Client, error) {
-	rt.clientOnce.Do(func() {
-		env, err := rt.Env()
-		if err != nil {
-			rt.clientErr = err
-			return
-		}
-		rt.client, rt.clientErr = request.NewClient(env, rt.Globals.Timeout)
-	})
+	if rt.client != nil && rt.clientTimeout == rt.Globals.Timeout {
+		return rt.client, rt.clientErr
+	}
+	env, err := rt.Env()
+	if err != nil {
+		return nil, err
+	}
+	rt.client, rt.clientErr = request.NewClient(env, rt.Globals.Timeout)
+	rt.clientTimeout = rt.Globals.Timeout
 	return rt.client, rt.clientErr
 }
 
@@ -138,9 +142,15 @@ func (rt *Runtime) Spec(ctx context.Context) (*spec.Spec, error) {
 			rt.specErr = err
 			return
 		}
+		strict, err := request.NewStrictClient(env, rt.Globals.Timeout)
+		if err != nil {
+			rt.specErr = err
+			return
+		}
 
 		fetcher := &spec.Fetcher{
 			Client:  client,
+			Strict:  strict,
 			Refresh: rt.Globals.Refresh,
 			Offline: rt.Globals.Offline,
 			Warnf:   rt.Warnf,

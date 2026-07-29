@@ -178,12 +178,12 @@ func TestDryRunIsStableAndRedacted(t *testing.T) {
 
 func TestDryRunRedactsASecretInTheBody(t *testing.T) {
 	stdout := &bytes.Buffer{}
-	r := &Renderer{Stdout: stdout, Stderr: &bytes.Buffer{}, Redactor: NewRedactor([]string{"pw-123"})}
+	r := &Renderer{Stdout: stdout, Stderr: &bytes.Buffer{}, Redactor: NewRedactor([]string{"pw-123-9f2c1d"})}
 
-	if err := r.DryRun("POST", "https://api.test/login", "dev", http.Header{}, []byte(`{"password":"pw-123"}`)); err != nil {
+	if err := r.DryRun("POST", "https://api.test/login", "dev", http.Header{}, []byte(`{"password":"pw-123-9f2c1d"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(stdout.String(), "pw-123") {
+	if strings.Contains(stdout.String(), "pw-123-9f2c1d") {
 		t.Errorf("dry run leaked a secret from the body:\n%s", stdout.String())
 	}
 }

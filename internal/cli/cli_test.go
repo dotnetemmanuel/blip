@@ -382,3 +382,137 @@ func TestSpeclessCommandsAllExist(t *testing.T) {
 		}
 	}
 }
+
+// A cloned repo chooses base_url and names a profile. Without pinning it also
+// chooses where your credential goes, which is the whole attack.
+func TestAProfileCanBePinnedToItsHosts(t *testing.T) {
+	srv := newStub(t)
+	f := liveFixture(t, srv, "")
+	f.writeCredentials(t, `
+[orders-dev]
+type  = "bearer"
+token = "super-secret-token"
+hosts = ["api.example.internal"]
+`)
+
+	got := f.run(t, "raw", "GET", "/healthz")
+
+	if got.code != output.ExitBlocked {
+		t.Errorf("exit = %d, want %d (%s)", got.code, output.ExitBlocked, got.stderr)
+	}
+	if srv.last.Method != "" {
+		t.Error("the credential was sent to a host its profile does not name")
+	}
+	if !strings.Contains(got.stderr, "hosts") {
+		t.Errorf("stderr = %q, want it to name the fix", got.stderr)
+	}
+}
+
+func TestAPinnedProfileStillReachesItsOwnHost(t *testing.T) {
+	srv := newStub(t)
+	f := liveFixture(t, srv, "")
+	host := strings.TrimPrefix(srv.URL, "http://")
+	f.writeCredentials(t, `
+[orders-dev]
+type  = "bearer"
+token = "super-secret-token"
+hosts = ["`+host+`"]
+`)
+
+	got := f.run(t, "raw", "GET", "/healthz")
+
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	if srv.last.Header.Get("Authorization") != "Bearer super-secret-token" {
+		t.Error("the credential was withheld from the host its profile names")
+	}
+}
+
+func TestAnUnpinnedProfileIsRefusedForARemoteHost(t *testing.T) {
+	// The cloned-repo attack: .blip.toml names the host and the profile, so an
+	// unpinned credential must not travel anywhere a repo points it.
+	f := newFixture(t, `
+name = "orders"
+[env.dev]
+base_url = "https://api.example.internal"
+auth = "orders-dev"
+[[route]]
+name = "health"
+method = "GET"
+path = "/healthz"
+`)
+	f.writeCredentials(t, bearerCreds)
+
+	got := f.run(t, "health", "--dry-run")
+
+	if got.code != output.ExitBlocked {
+		t.Errorf("exit = %d, want %d (%s)", got.code, output.ExitBlocked, got.stderr)
+	}
+	for _, want := range []string{"hosts = ", "api.example.internal", "orders-dev"} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", got.stderr, want)
+		}
+	}
+}
+
+func TestAnUnpinnedProfileIsQuietForLocalhost(t *testing.T) {
+	srv := newStub(t)
+	f := liveFixture(t, srv, "")
+
+	got := f.run(t, "raw", "GET", "/healthz")
+
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	if strings.Contains(got.stderr, "hosts") {
+		t.Errorf("stderr = %q, want no ceremony for a loopback host", got.stderr)
+	}
+}
+
+func TestSpeclessCommandsSurviveASeparatedGlobalFlag(t *testing.T) {
+	// --env dev used to be read as the subcommand "dev", so every one of these
+	// built the tree, fetched a spec and could reach for the vault.
+	f := newFixture(t, `
+name = "orders"
+[env.dev]
+base_url = "https://127.0.0.1:9"
+auth = "orders-dev"
+`)
+	f.writeCredentials(t, bearerCreds)
+
+	for _, args := range [][]string{
+		{"version"},
+		{"--env", "dev", "version"},
+		{"--profile", "orders-dev", "version"},
+		{"--env", "dev", "envs"},
+		{"--timeout", "5s", "envs"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			got := f.run(t, args...)
+			if got.code != output.ExitOK {
+				t.Errorf("exit = %d, want it to work without a spec (%s)", got.code, got.stderr)
+			}
+		})
+	}
+}
+
+func TestHelpWorksWhenTheSpecCannotLoad(t *testing.T) {
+	f := newFixture(t, "name = \"o\"\n[env.dev]\nbase_url = \"https://127.0.0.1:9\"\n")
+
+	for _, args := range [][]string{
+		{"describe", "--help"},
+		{"--help"},
+		{"raw", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			got := f.run(t, args...)
+			if got.code != output.ExitOK {
+				t.Errorf("exit = %d, want help to print anyway (%s)", got.code, got.stderr)
+			}
+			if !strings.Contains(got.stdout, "Usage:") {
+				t.Errorf("stdout = %q, want the help text", got.stdout)
+			}
+		})
+	}
+}

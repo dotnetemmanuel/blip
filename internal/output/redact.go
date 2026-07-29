@@ -9,6 +9,11 @@ import (
 // Placeholder is what replaces a secret in any output blip produces.
 const Placeholder = "<redacted>"
 
+// MinSecretLength is the shortest value worth substituting. Anything shorter
+// matches so much unrelated text that the output stops being reviewable, and the
+// pattern of holes leaks the value it was hiding.
+const MinSecretLength = 8
+
 // alwaysRedacted are headers whose value is secret whatever the profile says.
 var alwaysRedacted = []string{
 	"Authorization",
@@ -36,7 +41,7 @@ func NewRedactor(secrets []string, extraHeaders ...string) *Redactor {
 		}
 	}
 	for _, s := range secrets {
-		if s != "" {
+		if len(s) >= MinSecretLength {
 			r.secrets = append(r.secrets, s)
 		}
 	}

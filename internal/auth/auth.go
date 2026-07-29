@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +34,32 @@ type Authenticator interface {
 	Describe(ctx context.Context) (string, error)
 	// Secrets lists values that must be redacted from any output.
 	Secrets() []string
+	// PermitsHost reports whether this credential may be sent to a host.
+	PermitsHost(host string) bool
+	// Pinned reports whether the profile named the hosts it trusts.
+	Pinned() bool
+}
+
+// binding carries the hosts a profile pinned itself to. An unpinned profile
+// permits everything, which is why the caller warns about it.
+type binding struct{ hosts []string }
+
+func (b binding) Pinned() bool { return len(b.hosts) > 0 }
+
+func (b binding) PermitsHost(host string) bool {
+	if len(b.hosts) == 0 {
+		return true
+	}
+	bare, _, err := net.SplitHostPort(host)
+	if err != nil {
+		bare = host
+	}
+	for _, allowed := range b.hosts {
+		if strings.EqualFold(allowed, host) || strings.EqualFold(allowed, bare) {
+			return true
+		}
+	}
+	return false
 }
 
 func authError(format string, args ...any) error {
@@ -46,13 +73,13 @@ func New(r *creds.Resolved, client *http.Client) (Authenticator, error) {
 	case creds.KindNone:
 		return none{}, nil
 	case creds.KindBearer:
-		return bearer{token: r.Token}, nil
+		return bearer{binding: binding{r.Hosts}, token: r.Token}, nil
 	case creds.KindHeader:
-		return headerAuth{name: r.Header, value: r.Value}, nil
+		return headerAuth{binding: binding{r.Hosts}, name: r.Header, value: r.Value}, nil
 	case creds.KindBasic:
-		return basic{user: r.Username, password: r.Password}, nil
+		return basic{binding: binding{r.Hosts}, user: r.Username, password: r.Password}, nil
 	case creds.KindOAuth2CC:
-		return &oauth2CC{profile: r.Name, resolved: r, client: client}, nil
+		return &oauth2CC{binding: binding{r.Hosts}, profile: r.Name, resolved: r, client: client}, nil
 	default:
 		return nil, authError("profile %q has unsupported type %q", r.Name, r.Kind)
 	}
@@ -63,11 +90,16 @@ func None() Authenticator { return none{} }
 
 type none struct{}
 
+func (none) Pinned() bool                               { return true }
+func (none) PermitsHost(string) bool                    { return true }
 func (none) Apply(context.Context, *http.Request) error { return nil }
 func (none) Describe(context.Context) (string, error)   { return "none", nil }
 func (none) Secrets() []string                          { return nil }
 
-type bearer struct{ token string }
+type bearer struct {
+	binding
+	token string
+}
 
 func (b bearer) Apply(_ context.Context, req *http.Request) error {
 	req.Header.Set("Authorization", "Bearer "+b.token)
@@ -80,7 +112,10 @@ func (b bearer) Describe(context.Context) (string, error) {
 
 func (b bearer) Secrets() []string { return []string{b.token} }
 
-type headerAuth struct{ name, value string }
+type headerAuth struct {
+	binding
+	name, value string
+}
 
 func (h headerAuth) Apply(_ context.Context, req *http.Request) error {
 	req.Header.Set(h.name, h.value)
@@ -93,7 +128,10 @@ func (h headerAuth) Describe(context.Context) (string, error) {
 
 func (h headerAuth) Secrets() []string { return []string{h.value} }
 
-type basic struct{ user, password string }
+type basic struct {
+	binding
+	user, password string
+}
 
 func (b basic) Apply(_ context.Context, req *http.Request) error {
 	req.SetBasicAuth(b.user, b.password)
@@ -120,6 +158,7 @@ func Fingerprint(secret string) string {
 }
 
 type oauth2CC struct {
+	binding
 	profile  string
 	resolved *creds.Resolved
 	client   *http.Client

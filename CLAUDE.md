@@ -37,8 +37,13 @@ consumer is a coding agent that needs to call a backend while debugging; humans 
 - **A spec never owns a blip flag.** `binder.register` moves a parameter aside when it wants
   a name a global or a body flag holds. A spec that could claim `--dry-run` could send the
   mutation the caller was checking.
-- **Credentials only ever go to the API's own host.** The spec fetch refuses to authorize
-  against a different host, and a cross-host redirect is refused rather than followed.
+- **A credential only reaches the hosts its profile pins.** `hosts` in credentials.toml is
+  the only trusted statement of where a secret may go, because .blip.toml is committed and
+  may come from a cloned repo. Unpinned reaches loopback only. The spec fetch additionally
+  refuses to authorize against a different origin, and a cross-host or TLS-dropping
+  redirect is refused rather than followed.
+- **A path argument may not climb.** A `..` segment is refused rather than encoded and
+  hoped about, since servers differ on whether they decode before routing.
 - **`readonly` is not overridable.** Not by `--yes`, not by `--dry-run`.
 - **A schema type is a set, not a value.** OpenAPI 3.1, which .NET 10 emits, writes
   `"type": ["integer", "string"]`. kin-openapi's `Types.Is()` answers false for every

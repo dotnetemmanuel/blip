@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -282,8 +283,13 @@ func TestRedirectToAnotherHostIsRefused(t *testing.T) {
 			t.Errorf("the other host received the credential %q", got)
 		}
 	}
-	if output.ExitCodeFor(err) != output.ExitTransport {
-		t.Errorf("exit code = %d, want %d", output.ExitCodeFor(err), output.ExitTransport)
+	// A refusal is a safety decision, not a network failure, so a caller can
+	// tell it apart from a host being down.
+	if output.ExitCodeFor(err) != output.ExitBlocked {
+		t.Errorf("exit code = %d, want %d", output.ExitCodeFor(err), output.ExitBlocked)
+	}
+	if !errors.Is(err, ErrRedirectRefused) {
+		t.Errorf("err = %v, want it to wrap ErrRedirectRefused", err)
 	}
 }
 

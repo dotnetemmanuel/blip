@@ -23,7 +23,7 @@ var Names = []string{".blip.toml", "blip.toml"}
 const DefaultTimeout = 30 * time.Second
 
 // ErrNotFound means no config file exists between cwd and the filesystem root.
-var ErrNotFound = errors.New("no .blip.toml found in this directory or any parent")
+var ErrNotFound = errors.New("no .blip.toml found in this directory or any parent; run \"blip init <base-url>\" to create one")
 
 // Route is a hand-declared endpoint, for APIs with no spec.
 type Route struct {

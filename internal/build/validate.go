@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
+
+	"github.com/dotnetemmanuel/blip/internal/output"
 )
 
 // MaxReportedProblems bounds a validation message. A body that is wrong in
@@ -85,16 +87,9 @@ func flatten(err error) []string {
 		if where == "/" {
 			where = "body"
 		}
-		return []string{where + ": " + firstLine(e.Reason)}
+		return []string{where + ": " + output.FirstLine(e.Reason)}
 
 	default:
-		return []string{firstLine(err.Error())}
+		return []string{output.FirstLine(err.Error())}
 	}
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return strings.TrimSpace(s)
 }

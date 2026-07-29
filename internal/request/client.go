@@ -3,6 +3,7 @@ package request
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -56,6 +57,10 @@ func newClient(env *config.Environment, timeout time.Duration, insecure bool) (*
 	return &http.Client{Transport: t, Timeout: timeout, CheckRedirect: checkRedirect}, nil
 }
 
+// ErrRedirectRefused marks a redirect blip declined to follow, so it surfaces as
+// a safety refusal rather than as a network failure.
+var ErrRedirectRefused = errors.New("redirect refused")
+
 // checkRedirect refuses to carry credentials somewhere the caller did not ask
 // for. Go only strips Authorization across hostnames, which leaves a custom
 // header credential, a port change and a scheme downgrade all forwarded.
@@ -67,10 +72,11 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	origin := via[0].URL
 	switch {
 	case !strings.EqualFold(req.URL.Host, origin.Host):
-		return fmt.Errorf("refusing to follow a redirect from %s to %s: credentials would leave the configured host",
-			origin.Host, req.URL.Host)
+		return fmt.Errorf("%w: from %s to %s, credentials would leave the configured host",
+			ErrRedirectRefused, origin.Host, req.URL.Host)
 	case origin.Scheme == "https" && req.URL.Scheme != "https":
-		return fmt.Errorf("refusing to follow a redirect from https to %s: credentials would leave TLS", req.URL.Scheme)
+		return fmt.Errorf("%w: from https to %s, credentials would leave TLS",
+			ErrRedirectRefused, req.URL.Scheme)
 	}
 	return nil
 }

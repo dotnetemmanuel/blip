@@ -688,3 +688,68 @@ func TestA304RefreshesWhatIsRemembered(t *testing.T) {
 		t.Error("the revalidation was not written back to disk")
 	}
 }
+
+func TestASpecURLMustMatchTheOriginNotJustTheHost(t *testing.T) {
+	// Same host, plaintext scheme: the credential would leave TLS.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	base := env(t, srv.URL, srv.URL+"/spec")
+	base.BaseURL.Scheme = "https"
+
+	f := &Fetcher{
+		Client: srv.Client(),
+		Authorize: func(_ context.Context, req *http.Request) error {
+			req.Header.Set("Authorization", "Bearer super-secret")
+			return nil
+		},
+	}
+
+	_, err := f.Load(context.Background(), "orders", base)
+
+	if err == nil {
+		t.Fatal("Load succeeded, want a refusal")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitBlocked {
+		t.Errorf("exit code = %d, want %d", got, output.ExitBlocked)
+	}
+	for _, header := range seen {
+		if header != "" {
+			t.Errorf("a credential went to the plaintext origin: %q", header)
+		}
+	}
+}
+
+func TestCacheDirKeepsAHostileNameInsideTheCache(t *testing.T) {
+	// name and the environment both come from a committed .blip.toml.
+	t.Setenv("XDG_CACHE_HOME", "/tmp/blip-cache-test")
+
+	dir, err := CacheDir("../../../../etc/evil", "../../prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := "/tmp/blip-cache-test/blip/specs/"
+	if !strings.HasPrefix(dir, root) {
+		t.Errorf("CacheDir = %q, want it under the cache root", dir)
+	}
+	// The name may keep its dots; what matters is that no component is a climb
+	// and no separator was smuggled in, so the path cannot leave the root.
+	rest := strings.TrimPrefix(dir, root)
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 {
+		t.Errorf("CacheDir = %q, want exactly name/env under the root, got %d parts", dir, len(parts))
+	}
+	for _, part := range parts {
+		if part == ".." || part == "." || part == "" {
+			t.Errorf("CacheDir = %q has a traversal component %q", dir, part)
+		}
+	}
+	if filepath.Clean(dir) != dir {
+		t.Errorf("CacheDir = %q does not survive Clean, so it can still move", dir)
+	}
+}

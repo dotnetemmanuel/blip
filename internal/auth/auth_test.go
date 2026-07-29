@@ -119,8 +119,11 @@ func TestBasicSecretsIncludeTheEncodedPair(t *testing.T) {
 }
 
 func TestFingerprintIsStableAndShort(t *testing.T) {
-	if Fingerprint("abc") != Fingerprint("abc") {
-		t.Error("Fingerprint is not stable")
+	if got, again := Fingerprint("abc"), Fingerprint("abc"); got != again {
+		t.Errorf("Fingerprint is not stable: %q then %q", got, again)
+	}
+	if got := Fingerprint("abc"); !strings.HasPrefix(got, "sha256:") || len(got) != len("sha256:")+8 {
+		t.Errorf("Fingerprint = %q, want a short sha256 prefix", got)
 	}
 	if Fingerprint("abc") == Fingerprint("abd") {
 		t.Error("Fingerprint collides on different secrets")

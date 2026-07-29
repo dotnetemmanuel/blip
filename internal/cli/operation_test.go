@@ -203,13 +203,17 @@ func TestNumberParameterRejectsANonNumber(t *testing.T) {
 // else. Without this an id read from a previous response could redirect the call.
 func TestPathArgumentCannotEscapeTheOperationPath(t *testing.T) {
 	tests := []struct {
-		name string
-		arg  string
-		want string
+		name    string
+		arg     string
+		want    string
+		refused bool
 	}{
-		{"traversal", "../../admin/secrets", "/api/things/..%2F..%2Fadmin%2Fsecrets"},
-		{"embedded slash", "a/b", "/api/things/a%2Fb"},
-		{"ordinary id", "7f00-0101", "/api/things/7f00-0101"},
+		// A climb is refused outright: encoding it and hoping the server agrees
+		// is not a guarantee, since servers differ on whether they decode first.
+		{name: "traversal", arg: "../../admin/secrets", refused: true},
+		{name: "embedded slash", arg: "a/b", want: "/api/things/a%2Fb"},
+		{name: "ordinary id", arg: "7f00-0101", want: "/api/things/7f00-0101"},
+		{name: "dots inside a segment are fine", arg: "a..b", want: "/api/things/a..b"},
 	}
 
 	spec := `{"openapi":"3.0.1","info":{"title":"T","version":"1"},"paths":{
@@ -224,6 +228,15 @@ func TestPathArgumentCannotEscapeTheOperationPath(t *testing.T) {
 
 			got := f.run(t, "things", "get", tt.arg)
 
+			if tt.refused {
+				if got.code != output.ExitUsage {
+					t.Errorf("exit = %d, want %d", got.code, output.ExitUsage)
+				}
+				if srv.last.Method != "" {
+					t.Errorf("server saw %s %s, want nothing sent", srv.last.Method, srv.last.RequestURI)
+				}
+				return
+			}
 			if got.code != output.ExitOK {
 				t.Fatalf("exit = %d (%s)", got.code, got.stderr)
 			}

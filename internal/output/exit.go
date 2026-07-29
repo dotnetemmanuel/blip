@@ -4,6 +4,7 @@ package output
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // The exit-code contract. A caller branches on these, so they never change meaning.
@@ -68,4 +69,12 @@ func Blockedf(format string, args ...any) error {
 
 func codedf(code int, format string, args ...any) error {
 	return WithCode(fmt.Errorf(format, args...), code)
+}
+
+// FirstLine keeps a multi-line message out of a single-line diagnostic.
+func FirstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
 }

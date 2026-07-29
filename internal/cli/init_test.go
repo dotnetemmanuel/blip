@@ -109,16 +109,34 @@ func TestInitRecordsOnlyANonStandardSpecPath(t *testing.T) {
 	}
 }
 
-func TestInitRecordsAnUnusualSpecPath(t *testing.T) {
+func TestInitRecordsANonStandardSpecPath(t *testing.T) {
 	f := initFixture(t)
+	// Springdoc serves here, and blip does not probe it, so it has to be recorded
+	// or every later run would fail to find the spec.
 	srv := specServer(t, "/v3/api-docs")
 
-	// The probe list does not include this path, so it has to be written down.
-	f.run(t, "init", srv.URL+"/v3/api-docs")
+	got := f.run(t, "init", srv.URL)
 
-	body, _ := os.ReadFile(filepath.Join(f.dir, ".blip.toml"))
-	if strings.Contains(string(body), "spec_url") {
-		t.Skip("base URL pointed straight at the document, which is a different case")
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	body, err := os.ReadFile(filepath.Join(f.dir, ".blip.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `spec_url = "/v3/api-docs"`) {
+		t.Errorf("config = %q, want the non-standard path recorded", body)
+	}
+	cfg, err := config.Load(filepath.Join(f.dir, ".blip.toml"))
+	if err != nil {
+		t.Fatalf("the config init wrote does not load: %v", err)
+	}
+	env, err := cfg.ResolveEnv("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.SpecURL != "/v3/api-docs" {
+		t.Errorf("SpecURL = %q, want /v3/api-docs", env.SpecURL)
 	}
 }
 
@@ -212,8 +230,8 @@ func TestInitNeverOverwritesSomeoneElsesFiles(t *testing.T) {
 	if string(after) != original {
 		t.Errorf("settings.json was rewritten:\n%s", after)
 	}
-	if !strings.Contains(got.stdout, "add") {
-		t.Errorf("stdout = %q, want it to say what to add by hand", got.stdout)
+	if !strings.Contains(got.stderr, "add") {
+		t.Errorf("stderr = %q, want it to say what to add by hand", got.stderr)
 	}
 
 	// CLAUDE.md is append-only, so the existing content has to survive.
@@ -344,5 +362,179 @@ func TestInitRejectsANonURL(t *testing.T) {
 				t.Errorf("exit = %d, want %d", got.code, output.ExitUsage)
 			}
 		})
+	}
+}
+
+func TestInitRefusesCredentialsInTheBaseURL(t *testing.T) {
+	// base_url is committed, and probing would put these on the wire first.
+	for _, raw := range []string{
+		"http://admin:hunter2@127.0.0.1:9/base",
+		"http://127.0.0.1:9/base?api_key=SEKRET",
+		"http://127.0.0.1:9/base#tok",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			f := initFixture(t)
+
+			got := f.run(t, "init", raw)
+
+			if got.code != output.ExitUsage {
+				t.Errorf("exit = %d, want %d", got.code, output.ExitUsage)
+			}
+			if _, err := os.Stat(filepath.Join(f.dir, ".blip.toml")); err == nil {
+				body, _ := os.ReadFile(filepath.Join(f.dir, ".blip.toml"))
+				t.Errorf("a config was written anyway:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestInitDryRunTouchesNoNetwork(t *testing.T) {
+	f := initFixture(t)
+	probes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	got := f.run(t, "init", srv.URL, "--dry-run")
+
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	if probes != 0 {
+		t.Errorf("probes = %d, want a dry run to send nothing", probes)
+	}
+}
+
+func TestInitRefusesToWriteThroughASymlink(t *testing.T) {
+	tests := []struct {
+		name string
+		link string
+	}{
+		{"CLAUDE.md", "CLAUDE.md"},
+		{"the claude directory", ".claude"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := initFixture(t)
+			srv := specServer(t, "/openapi/v1.json")
+			outside := filepath.Join(t.TempDir(), "victim")
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(outside, "target")
+			if err := os.WriteFile(target, []byte("original\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(f.dir, tt.link)); err != nil {
+				t.Fatal(err)
+			}
+
+			f.run(t, "init", srv.URL)
+
+			body, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != "original\n" {
+				t.Errorf("a file outside the repo was written through the symlink:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestInitStopsAtTheHomeDirectory(t *testing.T) {
+	// A stray run in a dotfiles repo must not scaffold into the machine-wide
+	// .claude/settings.json.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(home, "scratch")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "confighome"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cachehome"))
+	t.Setenv("BLIP_ENV", "")
+	f := &fixture{dir: work}
+
+	f.run(t, "init", "https://127.0.0.1:9")
+
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); err == nil {
+		t.Error("init granted the permission machine-wide by writing into the home directory")
+	}
+	if _, err := os.Stat(filepath.Join(work, ".blip.toml")); err != nil {
+		t.Errorf("nothing was written where the user was standing: %v", err)
+	}
+}
+
+func TestInitReportsAWriteFailure(t *testing.T) {
+	f := initFixture(t)
+	srv := specServer(t, "/openapi/v1.json")
+	locked := filepath.Join(f.dir, ".claude")
+	if err := os.MkdirAll(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	got := f.run(t, "init", srv.URL)
+
+	if got.code == output.ExitOK {
+		t.Errorf("exit = 0 after failing to write the permission rule (%s)", got.stderr)
+	}
+}
+
+func TestInitDoesNotCallHTTPInsecure(t *testing.T) {
+	f := initFixture(t)
+
+	got := f.run(t, "init", "http://127.0.0.1:9")
+
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	body, err := os.ReadFile(filepath.Join(f.dir, ".blip.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "insecure") {
+		t.Errorf("config = %q, want no insecure line where there is no TLS", body)
+	}
+}
+
+func TestInitNoClaudeFlagExists(t *testing.T) {
+	// The README, the long help and the examples all name this spelling.
+	f := initFixture(t)
+	srv := specServer(t, "/openapi/v1.json")
+
+	got := f.run(t, "init", srv.URL, "--no-claude")
+
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "CLAUDE.md")); err == nil {
+		t.Error("--no-claude still wrote CLAUDE.md")
+	}
+}
+
+func TestInitWarnsAboutTheDangerousFlags(t *testing.T) {
+	f := initFixture(t)
+	srv := specServer(t, "/openapi/v1.json")
+
+	f.run(t, "init", srv.URL)
+
+	note, err := os.ReadFile(filepath.Join(f.dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// --config and --profile choose the host and the credential, so an agent has
+	// to be told about them, not only about --env.
+	for _, want := range []string{"--env", "--config", "--profile"} {
+		if !strings.Contains(string(note), want) {
+			t.Errorf("the note does not mention %q", want)
+		}
 	}
 }

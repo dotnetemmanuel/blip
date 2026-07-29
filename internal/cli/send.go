@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dotnetemmanuel/blip/internal/auth"
 	"github.com/dotnetemmanuel/blip/internal/build"
+	"github.com/dotnetemmanuel/blip/internal/config"
 	"github.com/dotnetemmanuel/blip/internal/output"
 	"github.com/dotnetemmanuel/blip/internal/request"
 	"github.com/dotnetemmanuel/blip/internal/safety"
@@ -29,22 +31,8 @@ func (rt *Runtime) send(ctx context.Context, req *request.Request, op *build.Ope
 		return err
 	}
 
-	gate := safety.Gate{
-		Readonly:    env.Readonly,
-		Yes:         rt.Globals.Yes,
-		DryRun:      rt.Globals.DryRun,
-		Interactive: rt.StdinIsTTY,
-		Confirm:     rt.confirm,
-	}
-	if err := gate.Check(httpReq.Method, httpReq.URL.String(), env.Name); err != nil {
-		return err
-	}
-
 	auth, err := rt.Authenticator(ctx)
 	if err != nil {
-		return err
-	}
-	if err := auth.Apply(ctx, httpReq); err != nil {
 		return err
 	}
 
@@ -55,6 +43,24 @@ func (rt *Runtime) send(ctx context.Context, req *request.Request, op *build.Ope
 		Stdout:         rt.Stdout,
 		Stderr:         rt.Stderr,
 		Redactor:       output.NewRedactor(auth.Secrets()),
+	}
+
+	gate := safety.Gate{
+		Readonly:    env.Readonly,
+		Yes:         rt.Globals.Yes,
+		DryRun:      rt.Globals.DryRun,
+		Interactive: rt.StdinIsTTY,
+		Confirm:     rt.confirm,
+	}
+	if err := gate.Check(httpReq.Method, renderer.Redactor.String(httpReq.URL.String()), env.Name); err != nil {
+		return err
+	}
+
+	if err := rt.checkHostPin(auth, httpReq.URL.Host); err != nil {
+		return err
+	}
+	if err := auth.Apply(ctx, httpReq); err != nil {
+		return err
 	}
 
 	if rt.Globals.DryRun {
@@ -122,4 +128,33 @@ func (rt *Runtime) validate(op *build.Operation, status int, body []byte) error 
 	}
 	rt.Warnf("%v", err)
 	return nil
+}
+
+// checkHostPin refuses to send a credential somewhere its profile does not name.
+// .blip.toml is committed and can come from a repo you merely cloned, so it must
+// not be able to choose both the destination and which secret goes there.
+func (rt *Runtime) checkHostPin(a auth.Authenticator, host string) error {
+	profile, err := rt.ProfileName()
+	if err != nil || profile == "" {
+		return err
+	}
+	bare := hostOf("//" + host)
+	if !a.Pinned() {
+		// Loopback is not somewhere a credential can be exfiltrated to, so local
+		// development needs no ceremony. Anywhere else, the repo would otherwise
+		// be choosing both the destination and the secret, and .blip.toml can
+		// come from a repository you merely cloned.
+		if config.IsLocalHost(bare) {
+			return nil
+		}
+		return output.Blockedf("profile %q has no hosts list, so blip will not send it to %s.\n"+
+			"       Add this to the [%s] profile in ~/.config/blip/credentials.toml:\n"+
+			"         hosts = [%q]",
+			profile, host, profile, bare)
+	}
+	if a.PermitsHost(host) {
+		return nil
+	}
+	return output.Blockedf("profile %q is not allowed to reach %s; its hosts list in credentials.toml does not include it",
+		profile, host)
 }
