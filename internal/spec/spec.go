@@ -2,6 +2,7 @@
 package spec
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,11 +38,13 @@ var ProbePaths = []string{
 const NegativeTTL = 10 * time.Minute
 
 // How a spec came to be in hand, which is worth reporting under --verbose.
+// The distinction that matters is whether the document changed, not whether a
+// full GET happened: a server with no ETag makes every run a full GET.
 const (
-	StatusFetched     = "fetched"
-	StatusRevalidated = "revalidated"
-	StatusCached      = "cached"
-	StatusStale       = "stale"
+	StatusFetched     = "fetched"     // the document is new or has changed
+	StatusRevalidated = "revalidated" // confirmed unchanged, by 304 or by bytes
+	StatusCached      = "cached"      // served from disk, network not consulted
+	StatusStale       = "stale"       // the backend was unreachable
 )
 
 // Spec is a document plus where it came from.
@@ -150,7 +153,13 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 			if i > 0 && cachedMeta.URL != "" && candidate != cachedMeta.URL {
 				f.warn("spec moved to %s", candidate)
 			}
-			return &Spec{Data: body, Meta: meta, Path: specPath(dir), Status: StatusFetched}, nil
+			// A server with no ETag makes every run a full fetch; only the bytes
+			// can say whether anything actually changed.
+			status := StatusFetched
+			if bytes.Equal(body, cached) {
+				status = StatusRevalidated
+			}
+			return &Spec{Data: body, Meta: meta, Path: specPath(dir), Status: status}, nil
 
 		default:
 			reachable = append(reachable, fmt.Sprintf("%s (%d)", candidate, status))

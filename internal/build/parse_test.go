@@ -385,3 +385,61 @@ func TestShortName(t *testing.T) {
 		}
 	}
 }
+
+func TestDotnetAssemblyTagIsNotAGroup(t *testing.T) {
+	// What Microsoft.AspNetCore.OpenApi emits for an endpoint declared without
+	// WithTags: the assembly name, which is also the start of the title.
+	spec := `{"openapi":"3.0.1","info":{"title":"OrdersApi | v1","version":"1.0.0"},"paths":{
+		"/healthz":{"get":{"tags":["OrdersApi"],"responses":{"200":{"description":"OK"}}}},
+		"/api/customers/{customerId}/orders":{"get":{"tags":["OrdersApi"],"parameters":[
+			{"name":"customerId","in":"path","required":true,"schema":{"type":"string"}}],
+			"responses":{"200":{"description":"OK"}}}},
+		"/api/orders":{"get":{"tags":["Orders"],"operationId":"listOrders","responses":{"200":{"description":"OK"}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := strings.Join(api.Groups(), ",")
+	if got != "customers,healthz,orders" {
+		t.Errorf("groups = %q, want the assembly tag ignored and paths used instead", got)
+	}
+	if op := api.Find("orders-healthz-get"); op != nil {
+		t.Error("the assembly tag was used as a group")
+	}
+}
+
+func TestARealTagIsStillHonouredWhenItMatchesNothing(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"Billing | v1","version":"1"},"paths":{
+		"/api/invoices":{"get":{"tags":["Invoices"],"operationId":"listInvoices","responses":{"200":{"description":"OK"}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := api.Operations[0].Group; got != "invoices" {
+		t.Errorf("group = %q, want invoices", got)
+	}
+}
+
+func TestNullEnumMemberIsDropped(t *testing.T) {
+	// .NET emits this for a nullable enum query parameter.
+	spec := `{"openapi":"3.0.1","info":{"title":"x","version":"1"},"paths":{
+		"/api/orders":{"get":{"tags":["Orders"],"operationId":"listOrders","parameters":[
+			{"name":"status","in":"query","schema":{"enum":["Open","Shipped",null]}}],
+			"responses":{"200":{"description":"OK"}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status := api.Operations[0].ParamsIn(InQuery)[0]
+	if got := strings.Join(status.Enum, ","); got != "Open,Shipped" {
+		t.Errorf("enum = %q, want the null member dropped", got)
+	}
+	if status.Type != TypeString {
+		t.Errorf("type = %q, want an enum with no type to bind as a string", status.Type)
+	}
+}

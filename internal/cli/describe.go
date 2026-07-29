@@ -30,9 +30,7 @@ func newDescribeCommand(rt *Runtime) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			for _, w := range api.Warnings {
-				rt.Warnf("%s", w)
-			}
+			rt.ReportSpecWarnings(api, true)
 
 			out := cmd.OutOrStdout()
 			switch {

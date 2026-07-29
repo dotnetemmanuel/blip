@@ -337,11 +337,15 @@ func TestRefreshSkipsTheConditionalRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != StatusFetched {
-		t.Errorf("Status = %q, want a full fetch", got.Status)
-	}
 	if srv.conditions != 0 {
 		t.Errorf("conditional requests = %d, want --refresh to send none", srv.conditions)
+	}
+	if before := len(srv.requests); before < 2 {
+		t.Errorf("requests = %d, want --refresh to go to the server", before)
+	}
+	// The document came back byte-identical, which is what the status reports.
+	if got.Status != StatusRevalidated {
+		t.Errorf("Status = %q, want %q", got.Status, StatusRevalidated)
 	}
 }
 
@@ -487,5 +491,48 @@ func TestNoSpecIsNotRememberedWhenTheHostIsUnreachable(t *testing.T) {
 	}
 	if _, err := os.Stat(noSpecMarker(dir)); err == nil {
 		t.Error("a dead host was remembered as having no spec; it may simply have been down")
+	}
+}
+
+func TestUnchangedBytesCountAsRevalidatedWithoutAnETag(t *testing.T) {
+	// Microsoft.AspNetCore.OpenApi serves no ETag, so every run is a full fetch
+	// and only the bytes can say whether the spec actually moved.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	body := minimalSpec
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/v1.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	f := &Fetcher{Client: srv.Client()}
+	e := env(t, srv.URL, "")
+
+	first, err := f.Load(context.Background(), "orders", e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != StatusFetched {
+		t.Errorf("Status = %q, want %q on the first run", first.Status, StatusFetched)
+	}
+
+	second, err := f.Load(context.Background(), "orders", e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Status != StatusRevalidated {
+		t.Errorf("Status = %q, want identical bytes to count as unchanged", second.Status)
+	}
+
+	body = `{"openapi":"3.0.1","info":{"title":"orders","version":"2"},"paths":{}}`
+	third, err := f.Load(context.Background(), "orders", e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Status != StatusFetched {
+		t.Errorf("Status = %q, want a changed spec to read as fetched", third.Status)
 	}
 }

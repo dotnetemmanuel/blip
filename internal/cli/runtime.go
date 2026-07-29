@@ -61,6 +61,8 @@ type Runtime struct {
 	apiOnce sync.Once
 	api     *build.API
 	apiErr  error
+
+	warningsShown bool
 }
 
 // Warnf writes a diagnostic to stderr. Nothing blip warns about belongs on stdout.
@@ -175,7 +177,7 @@ func (rt *Runtime) API(ctx context.Context) (*build.API, error) {
 			if rt.apiErr != nil {
 				return
 			}
-			rt.reportWarnings(api, s.Status == spec.StatusFetched)
+			defer func() { rt.ReportSpecWarnings(api, s.Status == spec.StatusFetched) }()
 		case len(cfg.Routes) > 0:
 			// Hand-declared routes are the whole point of working without a spec.
 			rt.Verbosef("no spec (%v), using the %d declared routes", specErr, len(cfg.Routes))
@@ -193,12 +195,16 @@ func (rt *Runtime) API(ctx context.Context) (*build.API, error) {
 	return rt.api, rt.apiErr
 }
 
-// reportWarnings puts spec problems on stderr when they are new, so that a run
-// against an unchanged spec is quiet.
-func (rt *Runtime) reportWarnings(api *build.API, specChanged bool) {
-	if !specChanged && !rt.Globals.Verbose {
+// ReportSpecWarnings puts spec problems on stderr when they are new, so a run
+// against an unchanged spec stays quiet. It reports at most once per process.
+func (rt *Runtime) ReportSpecWarnings(api *build.API, force bool) {
+	if rt.warningsShown || api == nil {
 		return
 	}
+	if !force && !rt.Globals.Verbose {
+		return
+	}
+	rt.warningsShown = true
 	for _, w := range api.Warnings {
 		rt.Warnf("%s", w)
 	}

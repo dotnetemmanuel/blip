@@ -47,6 +47,7 @@ func Parse(data []byte) (*API, error) {
 		return api, nil
 	}
 
+	titleTag := assemblyTag(api.Title)
 	groups := map[string]deduplicator{}
 	renamedGroups := map[string]string{}
 	var derived []string
@@ -62,7 +63,7 @@ func Parse(data []byte) (*API, error) {
 				continue
 			}
 
-			group := groupFor(specOp.Tags, p, renamedGroups, &api.Warnings)
+			group := groupFor(meaningfulTags(specOp.Tags, titleTag), p, renamedGroups, &api.Warnings)
 			if groups[group] == nil {
 				groups[group] = deduplicator{}
 			}
@@ -133,6 +134,21 @@ func methodRank(method string) int {
 		}
 	}
 	return len(methodOrder)
+}
+
+// assemblyTag is the tag .NET applies to endpoints declared without WithTags:
+// the assembly name, which also opens the document title ("OrdersApi | v1").
+func assemblyTag(title string) string {
+	name, _, _ := strings.Cut(title, "|")
+	return kebab(name)
+}
+
+// meaningfulTags drops a tag that only says which assembly served the endpoint.
+func meaningfulTags(tags []string, titleTag string) []string {
+	if titleTag == "" || len(tags) == 0 || kebab(tags[0]) != titleTag {
+		return tags
+	}
+	return tags[1:]
 }
 
 func groupFor(tags []string, p string, renamed map[string]string, warnings *[]string) string {
@@ -320,13 +336,18 @@ func isObject(s *openapi3.Schema) bool {
 	return s != nil && s.Type != nil && s.Type.Is("object")
 }
 
+// enumStrings drops a null member, which .NET emits for a nullable enum and
+// which is not a value anyone can pass on a command line.
 func enumStrings(values []any) []string {
-	if len(values) == 0 {
-		return nil
-	}
 	out := make([]string, 0, len(values))
 	for _, v := range values {
+		if v == nil {
+			continue
+		}
 		out = append(out, fmt.Sprint(v))
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

@@ -277,3 +277,70 @@ func TestRoutesAppearInTheCompactListing(t *testing.T) {
 		t.Errorf("line = %q, want declared routes marked", lines[0])
 	}
 }
+
+func TestValidateResponse(t *testing.T) {
+	api := load(t, "dotnet9-minimal.json")
+	get := find(t, api, "orders", "get")
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"conforming", `{"id":"7f000101-0000-4000-8000-000000000000","status":"open","total":1.5}`, ""},
+		{"empty body is not a mismatch", ``, ""},
+		{"wrong type", `{"total":"lots"}`, "/total"},
+		{"not json at all", `<html>`, "was not JSON"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := get.ValidateResponse(200, []byte(tt.body))
+
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateResponse = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateResponse = nil, want an error mentioning %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %q, want it to mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidationMessageIsOneLine(t *testing.T) {
+	api := load(t, "dotnet9-minimal.json")
+	get := find(t, api, "orders", "get")
+
+	err := get.ValidateResponse(200, []byte(`{"id":12,"total":"lots","status":[]}`))
+	if err == nil {
+		t.Fatal("ValidateResponse = nil, want a mismatch")
+	}
+
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("message spans lines, which buries it in the diagnostics:\n%s", err)
+	}
+	if strings.Contains(err.Error(), "Schema:") {
+		t.Errorf("message dumps the whole schema:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), ";") {
+		t.Errorf("message = %q, want the separate problems joined", err)
+	}
+}
+
+func TestValidationIsSkippedWithNoDeclaredSchema(t *testing.T) {
+	api := load(t, "dotnet9-minimal.json")
+	op := find(t, api, "healthz", "get")
+
+	if err := op.ValidateResponse(200, []byte(`{"anything":true}`)); err != nil {
+		t.Errorf("ValidateResponse = %v, want nil when the spec declares no schema", err)
+	}
+	if op.HasResponseSchema(200) {
+		t.Error("HasResponseSchema = true, want false")
+	}
+}
