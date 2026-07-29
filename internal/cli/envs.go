@@ -28,7 +28,7 @@ func newEnvsCommand(rt *Runtime) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "envs",
 		Short: "List environments and their resolved base URLs",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			listings, err := collectEnvs(rt)
 			if err != nil {

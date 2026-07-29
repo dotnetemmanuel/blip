@@ -33,6 +33,13 @@ func WithCode(err error, code int) error {
 	return &codedError{code: code, err: err}
 }
 
+// Silent carries an exit code with nothing left to say, for when the failure has
+// already been reported in full: a 404 body is the message, and "blip: error" on
+// top of it is noise.
+func Silent(code int) error {
+	return &codedError{code: code, err: errors.New("")}
+}
+
 // ExitCodeFor reports the exit code for err. An untagged error is a bug in blip,
 // not a predictable failure, so it maps to ExitInternal.
 func ExitCodeFor(err error) int {

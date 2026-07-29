@@ -26,6 +26,10 @@ type Runtime struct {
 	Stderr io.Writer
 	Stdin  *os.File
 
+	// Input is where a request body or a confirmation is read from. It defaults
+	// to Stdin; tests supply their own.
+	Input io.Reader
+
 	StdinIsTTY  bool
 	StdoutIsTTY bool
 
@@ -163,6 +167,17 @@ func (rt *Runtime) stderrFile() *os.File {
 		return f
 	}
 	return nil
+}
+
+// input is where --data @- and the confirmation prompt read from.
+func (rt *Runtime) input() io.Reader {
+	if rt.Input != nil {
+		return rt.Input
+	}
+	if rt.Stdin == nil {
+		return nil
+	}
+	return rt.Stdin
 }
 
 // interactiveStdin is handed to vault commands only at a terminal: a pinentry

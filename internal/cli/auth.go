@@ -11,7 +11,7 @@ func newAuthCommand(rt *Runtime) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
 		Short: "Inspect credential resolution",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -29,7 +29,7 @@ func newAuthTestCommand(rt *Runtime) *cobra.Command {
 Any _command is executed and, for oauth2_cc, a token is actually fetched, so a
 success here means the credential really can be produced. Secrets are reported
 only as a fingerprint.`,
-		Args: cobra.NoArgs,
+		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			env, err := rt.Env()
 			if err != nil {

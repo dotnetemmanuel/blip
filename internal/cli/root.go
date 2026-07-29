@@ -45,6 +45,7 @@ func NewRootCommand(rt *Runtime) *cobra.Command {
 		newVersionCommand(),
 		newEnvsCommand(rt),
 		newAuthCommand(rt),
+		newRawCommand(rt),
 	)
 
 	return root
@@ -76,7 +77,9 @@ func Run(rt *Runtime, args []string) int {
 		return output.ExitOK
 	}
 
-	fmt.Fprintf(rt.Stderr, "blip: %v\n", err)
+	if msg := err.Error(); msg != "" {
+		fmt.Fprintf(rt.Stderr, "blip: %s\n", msg)
+	}
 	return output.ExitCodeFor(classify(err))
 }
 
