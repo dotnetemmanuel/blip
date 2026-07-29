@@ -14,6 +14,7 @@ const (
 	ExitTransport = 6 // DNS, connection refused, timeout, TLS
 	ExitClient    = 7 // 4xx other than 401/403
 	ExitServer    = 8 // 5xx
+	ExitSchema    = 9 // response did not match the spec schema, under --strict
 )
 
 type codedError struct {

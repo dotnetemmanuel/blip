@@ -44,8 +44,8 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"unknown command", []string{"nope"}},
 		{"unknown flag", []string{"version", "--bogus"}},
+		{"surplus argument", []string{"version", "extra"}},
 	}
 
 	for _, tt := range tests {

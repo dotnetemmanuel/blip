@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/dotnetemmanuel/blip/internal/auth"
+	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/config"
 	"github.com/dotnetemmanuel/blip/internal/creds"
 	"github.com/dotnetemmanuel/blip/internal/output"
@@ -56,6 +57,10 @@ type Runtime struct {
 	specOnce sync.Once
 	spec     *spec.Spec
 	specErr  error
+
+	apiOnce sync.Once
+	api     *build.API
+	apiErr  error
 }
 
 // Warnf writes a diagnostic to stderr. Nothing blip warns about belongs on stdout.
@@ -152,6 +157,53 @@ func (rt *Runtime) Spec(ctx context.Context) (*spec.Spec, error) {
 	return rt.spec, rt.specErr
 }
 
+// API returns the parsed command model for the resolved environment, merged with
+// any hand-declared routes.
+func (rt *Runtime) API(ctx context.Context) (*build.API, error) {
+	rt.apiOnce.Do(func() {
+		cfg, err := rt.Config()
+		if err != nil {
+			rt.apiErr = err
+			return
+		}
+
+		var api *build.API
+		s, specErr := rt.Spec(ctx)
+		switch {
+		case specErr == nil:
+			api, rt.apiErr = build.Parse(s.Data)
+			if rt.apiErr != nil {
+				return
+			}
+			rt.reportWarnings(api, s.Status == spec.StatusFetched)
+		case len(cfg.Routes) > 0:
+			// Hand-declared routes are the whole point of working without a spec.
+			rt.Verbosef("no spec (%v), using the %d declared routes", specErr, len(cfg.Routes))
+			api = &build.API{Title: cfg.Name}
+		default:
+			rt.apiErr = specErr
+			return
+		}
+
+		if rt.apiErr = api.AddRoutes(declaredRoutes(cfg)); rt.apiErr != nil {
+			return
+		}
+		rt.api = api
+	})
+	return rt.api, rt.apiErr
+}
+
+// reportWarnings puts spec problems on stderr when they are new, so that a run
+// against an unchanged spec is quiet.
+func (rt *Runtime) reportWarnings(api *build.API, specChanged bool) {
+	if !specChanged && !rt.Globals.Verbose {
+		return
+	}
+	for _, w := range api.Warnings {
+		rt.Warnf("%s", w)
+	}
+}
+
 // ProfileName is the credentials profile in force: --profile if given, otherwise
 // whatever the environment names.
 func (rt *Runtime) ProfileName() (string, error) {
@@ -232,4 +284,19 @@ func (rt *Runtime) interactiveStdin() *os.File {
 		return rt.Stdin
 	}
 	return nil
+}
+
+// declaredRoutes converts [[route]] config entries into the build model.
+func declaredRoutes(cfg *config.Config) []build.Route {
+	routes := make([]build.Route, 0, len(cfg.Routes))
+	for _, r := range cfg.Routes {
+		routes = append(routes, build.Route{
+			Name:    r.Name,
+			Method:  r.Method,
+			Path:    r.Path,
+			Summary: r.Summary,
+			Group:   r.Group,
+		})
+	}
+	return routes
 }

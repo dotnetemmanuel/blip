@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/output"
 	"github.com/dotnetemmanuel/blip/internal/request"
 	"github.com/dotnetemmanuel/blip/internal/safety"
@@ -21,6 +22,10 @@ type call struct {
 	Query  url.Values
 	Header http.Header
 	Body   []byte
+
+	// operation is set when the call came from the spec, which is what makes
+	// response validation possible.
+	operation *build.Operation
 }
 
 // send applies safety, auth and output rules, then either prints the request
@@ -99,6 +104,10 @@ func (rt *Runtime) send(ctx context.Context, c call) error {
 		return err
 	}
 
+	if err := rt.validate(c.operation, resp.Status, resp.Body); err != nil {
+		return err
+	}
+
 	code := output.ExitCodeForStatus(resp.Status)
 	if code == output.ExitOK {
 		return nil
@@ -118,4 +127,22 @@ func (rt *Runtime) confirm(prompt string) (bool, error) {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes", nil
+}
+
+// validate checks a response against the spec. Drift is a warning by default,
+// because a mismatched schema should never stop you debugging; --strict turns it
+// into a failure for the cases where the contract is the thing under test.
+func (rt *Runtime) validate(op *build.Operation, status int, body []byte) error {
+	if op == nil {
+		return nil
+	}
+	err := op.ValidateResponse(status, body)
+	if err == nil {
+		return nil
+	}
+	if rt.Globals.Strict {
+		return output.WithCode(err, output.ExitSchema)
+	}
+	rt.Warnf("%v", err)
+	return nil
 }

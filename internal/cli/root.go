@@ -69,6 +69,17 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 // Run executes args against an already-built runtime and returns the exit code.
 func Run(rt *Runtime, args []string) int {
 	root := NewRootCommand(rt)
+
+	if wantsSpec(args) {
+		if err := attachGenerated(context.Background(), rt, root); err != nil {
+			if !isHelpOnly(args) {
+				fmt.Fprintf(rt.Stderr, "blip: %s\n", err)
+				return output.ExitCodeFor(classify(err))
+			}
+			rt.Warnf("%v", err)
+		}
+	}
+
 	root.SetOut(rt.Stdout)
 	root.SetErr(rt.Stderr)
 	root.SetArgs(args)

@@ -307,3 +307,42 @@ func TestGlobalFlagsAreRegistered(t *testing.T) {
 		}
 	}
 }
+
+const routeOnly = `
+name = "orders"
+[env.dev]
+base_url = "https://localhost:9"
+[[route]]
+name = "health"
+method = "GET"
+path = "/healthz"
+`
+
+func TestUnknownCommandInAConfiguredRepoIsExitTwo(t *testing.T) {
+	f := newFixture(t, routeOnly)
+
+	got := f.run(t, "nope", "--offline")
+
+	if got.code != output.ExitUsage {
+		t.Errorf("exit = %d, want %d (%s)", got.code, output.ExitUsage, got.stderr)
+	}
+	if !strings.Contains(got.stderr, "unknown command") {
+		t.Errorf("stderr = %q, want it to say the command is unknown", got.stderr)
+	}
+}
+
+func TestUnknownCommandWithNoConfigReportsTheConfigProblem(t *testing.T) {
+	f := &fixture{dir: t.TempDir()}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("BLIP_ENV", "")
+
+	got := f.run(t, "orders", "get", "1")
+
+	if got.code != output.ExitConfig {
+		t.Errorf("exit = %d, want %d", got.code, output.ExitConfig)
+	}
+	if !strings.Contains(got.stderr, ".blip.toml") {
+		t.Errorf("stderr = %q, want the real problem named", got.stderr)
+	}
+}
