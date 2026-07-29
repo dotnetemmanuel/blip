@@ -1,0 +1,8 @@
+customers orders-get-by-customer-id  GET     /api/customers/{customerId}/orders  customerId
+healthz get                          GET     /healthz
+orders list                          GET     /api/orders                         ?status,?page,?pageSize,?tag
+orders create                        POST    /api/orders                         body!:CreateOrderRequest
+orders get                           GET     /api/orders/{id}                    id,@X-Tenant
+orders delete-by-id                  DELETE  /api/orders/{id}                    id
+orders cancel                        POST    /api/orders/{id}/cancel             id  body!:CancelReason
+orders lines-get-by-id-by-line-id    GET     /api/orders/{id}/lines/{lineId}     id,lineId

@@ -34,6 +34,10 @@ func newStub(t *testing.T) *stub {
 	t.Helper()
 	s := &stub{status: http.StatusOK, body: `{"ok":true}`}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/openapi/") || strings.HasPrefix(r.URL.Path, "/swagger/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		s.last = capture{
 			Method: r.Method,

@@ -190,11 +190,10 @@ func params(shared, own openapi3.Parameters) []Param {
 		}
 	}
 
+	// Grouped by kind, but spec order within a kind: the author put the useful
+	// parameters first, and that ordering is already deterministic.
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].In != out[j].In {
-			return inRank(out[i].In) < inRank(out[j].In)
-		}
-		return out[i].Name < out[j].Name
+		return inRank(out[i].In) < inRank(out[j].In)
 	})
 	return out
 }

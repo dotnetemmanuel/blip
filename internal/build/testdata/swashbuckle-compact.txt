@@ -1,0 +1,5 @@
+inventory adjust    PATCH   /api/Inventory/{sku}/adjust  sku,?delta*
+products get-all    GET     /api/Products                ?search
+products create     POST    /api/Products                body:Product
+products get-by-id  GET     /api/Products/{id}           id
+products update     PUT     /api/Products/{id}           id  body:Product

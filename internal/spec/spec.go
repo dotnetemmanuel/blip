@@ -31,6 +31,11 @@ var ProbePaths = []string{
 	"/swagger/v1/swagger.yaml",
 }
 
+// NegativeTTL is how long blip remembers that an environment serves no spec.
+// Without it, a config that declares routes instead of a spec would pay for four
+// failed probes on every single command.
+const NegativeTTL = 10 * time.Minute
+
 // How a spec came to be in hand, which is worth reporting under --verbose.
 const (
 	StatusFetched     = "fetched"
@@ -104,6 +109,11 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 		return &Spec{Data: cached, Meta: cachedMeta, Path: specPath(dir), Status: StatusCached}, nil
 	}
 
+	if env.SpecURL == "" && !f.Refresh && recentlyProbedInVain(dir) {
+		return nil, configError("no OpenAPI spec was found for env.%s the last time blip looked, and nothing has been re-probed since; run with --refresh to look again, or set spec_url",
+			env.Name)
+	}
+
 	candidates, err := f.candidates(env, cachedMeta)
 	if err != nil {
 		return nil, err
@@ -136,6 +146,7 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 			if err := writeCache(dir, body, meta); err != nil {
 				f.warn("%v", err)
 			}
+			_ = os.Remove(noSpecMarker(dir))
 			if i > 0 && cachedMeta.URL != "" && candidate != cachedMeta.URL {
 				f.warn("spec moved to %s", candidate)
 			}
@@ -153,7 +164,26 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 		return &Spec{Data: cached, Meta: cachedMeta, Path: specPath(dir), Status: StatusStale}, nil
 	}
 
+	if len(reachable) > 0 {
+		rememberNoSpec(dir)
+	}
 	return nil, f.noSpecError(env, reachable, unreachable)
+}
+
+func noSpecMarker(dir string) string { return filepath.Join(dir, "nospec") }
+
+// recentlyProbedInVain reports whether blip already probed this environment and
+// came away empty, recently enough to trust.
+func recentlyProbedInVain(dir string) bool {
+	info, err := os.Stat(noSpecMarker(dir))
+	return err == nil && time.Since(info.ModTime()) < NegativeTTL
+}
+
+func rememberNoSpec(dir string) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	_ = os.WriteFile(noSpecMarker(dir), nil, 0o600)
 }
 
 func (f *Fetcher) noSpecError(env *config.Environment, reachable, unreachable []string) error {

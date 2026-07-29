@@ -1,0 +1,16 @@
+Orders API 1.0.0
+name  METHOD  path  args: bare=positional, ?query, @header, *=required, body:Schema
+
+customers
+  customers orders-get-by-customer-id  GET     /api/customers/{customerId}/orders  customerId  # List a customer's orders
+
+healthz
+  healthz get                          GET     /healthz  # Liveness probe
+
+orders
+  orders list                          GET     /api/orders                         ?status,?page,?pageSize,?tag  # List orders
+  orders create                        POST    /api/orders                         body!:CreateOrderRequest  # Create an order
+  orders get                           GET     /api/orders/{id}                    id,@X-Tenant  # Get an order by id
+  orders delete-by-id                  DELETE  /api/orders/{id}                    id  # Delete an order
+  orders cancel                        POST    /api/orders/{id}/cancel             id  body!:CancelReason  # Cancel an order
+  orders lines-get-by-id-by-line-id    GET     /api/orders/{id}/lines/{lineId}     id,lineId  # Get one line of an order

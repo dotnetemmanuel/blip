@@ -1,0 +1,6 @@
+exports get                        GET     /api/v1/exports
+exports download-get-by-export-id  GET     /api/v1/exports/{exportId}/download  exportId
+reports get                        GET     /api/v1/reports
+reports post                       POST    /api/v1/reports                      body:json
+reports get-by-report-id           GET     /api/v1/reports/{reportId}           reportId
+reports delete-by-report-id        DELETE  /api/v1/reports/{reportId}           reportId

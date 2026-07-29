@@ -431,3 +431,61 @@ func TestLooksLikeSpec(t *testing.T) {
 		})
 	}
 }
+
+func TestNoSpecIsRememberedForAWhile(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	f := &Fetcher{Client: srv.Client()}
+	e := env(t, srv.URL, "")
+
+	if _, err := f.Load(context.Background(), "legacy", e); err == nil {
+		t.Fatal("Load succeeded with no spec anywhere")
+	}
+	probed := requests
+	if probed != len(ProbePaths) {
+		t.Fatalf("requests = %d, want one per probe path", probed)
+	}
+
+	if _, err := f.Load(context.Background(), "legacy", e); err == nil {
+		t.Fatal("Load succeeded with no spec anywhere")
+	}
+	if requests != probed {
+		t.Errorf("requests = %d, want the second run to skip probing", requests-probed)
+	}
+
+	f.Refresh = true
+	if _, err := f.Load(context.Background(), "legacy", e); err == nil {
+		t.Fatal("Load succeeded with no spec anywhere")
+	}
+	if requests == probed {
+		t.Error("--refresh did not re-probe")
+	}
+}
+
+func TestNoSpecIsNotRememberedWhenTheHostIsUnreachable(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	client := srv.Client()
+	srv.Close()
+
+	f := &Fetcher{Client: client}
+	e := env(t, srv.URL, "")
+
+	if _, err := f.Load(context.Background(), "legacy", e); err == nil {
+		t.Fatal("Load succeeded against a dead host")
+	}
+
+	dir, err := CacheDir("legacy", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(noSpecMarker(dir)); err == nil {
+		t.Error("a dead host was remembered as having no spec; it may simply have been down")
+	}
+}
