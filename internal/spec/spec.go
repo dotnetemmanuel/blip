@@ -86,6 +86,26 @@ func (f *Fetcher) warn(format string, args ...any) {
 	}
 }
 
+// Probe reports which of the standard paths serves a spec, for scaffolding a
+// config before one exists. It does not cache anything.
+func Probe(ctx context.Context, client *http.Client, base *url.URL) (string, bool) {
+	f := &Fetcher{Client: client}
+	env := &config.Environment{Name: "probe", BaseURL: base}
+
+	candidates, err := f.candidates(env, Meta{})
+	if err != nil {
+		return "", false
+	}
+	for _, candidate := range candidates {
+		status, body, _, err := f.get(ctx, candidate, "", false)
+		if err != nil || status != http.StatusOK || !looksLikeSpec(body) {
+			continue
+		}
+		return candidate, true
+	}
+	return "", false
+}
+
 // CacheDir is where the spec for one environment of one API is kept. The
 // environment is part of the key because dev and prod can serve different specs.
 func CacheDir(apiName, envName string) (string, error) {

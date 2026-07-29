@@ -57,7 +57,7 @@ internal/build     spec to command tree, name derivation, describe rendering
 internal/request   URL resolution, body assembly, execution
 internal/output    rendering, redaction, exit codes
 internal/safety    readonly and the TTY/--yes gate
-internal/cli       command wiring and the runtime
+internal/cli       command wiring, the runtime, and init
 ```
 
 ## Using blip against this repo's own fixtures

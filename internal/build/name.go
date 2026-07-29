@@ -10,6 +10,7 @@ import (
 // because a spec must never be able to shadow blip's own commands.
 var Reserved = map[string]bool{
 	"version":  true,
+	"init":     true,
 	"envs":     true,
 	"auth":     true,
 	"raw":      true,

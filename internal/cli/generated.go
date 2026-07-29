@@ -11,6 +11,7 @@ import (
 // never pay for fetching one.
 var specless = map[string]bool{
 	"version":    true,
+	"init":       true,
 	"envs":       true,
 	"auth":       true,
 	"raw":        true,

@@ -48,6 +48,7 @@ func NewRootCommand(rt *Runtime) *cobra.Command {
 		newRawCommand(rt),
 		newSpecCommand(rt),
 		newDescribeCommand(rt),
+		newInitCommand(rt),
 	)
 
 	return root

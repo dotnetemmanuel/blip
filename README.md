@@ -33,19 +33,58 @@ Because the primary caller is a program, not a person:
 
 ## Install
 
+Download a binary from the [latest release](https://github.com/dotnetemmanuel/blip/releases/latest):
+
 ```sh
-git clone https://github.com/dotnetemmanuel/blip
-cd blip
-make install        # builds and installs to ~/.local/bin/blip
+curl -fsSL -o blip https://github.com/dotnetemmanuel/blip/releases/latest/download/blip-linux-amd64
+chmod +x blip && mv blip ~/.local/bin/
 ```
 
-Install once, per machine. Not per repo. `make dist` cross-compiles for linux and darwin
-on amd64 and arm64 into `dist/`.
+Swap `linux-amd64` for `linux-arm64`, `darwin-amd64` or `darwin-arm64`. Each release
+carries a `SHA256SUMS` if you want to check it.
+
+With a Go toolchain instead:
+
+```sh
+go install github.com/dotnetemmanuel/blip@latest      # installs to $(go env GOPATH)/bin
+```
+
+Or from source, which produces a smaller stripped binary:
+
+```sh
+git clone https://github.com/dotnetemmanuel/blip && cd blip
+make install                                          # installs to ~/.local/bin/blip
+```
+
+Install once, per machine. Not per repo. `make dist` cross-compiles all four targets
+into `dist/`.
+
+## Set up a repo
+
+```sh
+cd your-repo
+blip init https://localhost:7284 --auth orders-dev
+```
+
+`init` probes the base URL for a spec, writes `.blip.toml` at the repo root, and leaves a
+note in `CLAUDE.md` plus a permission rule in `.claude/settings.json` so an agent knows the
+tool exists and can run it without a prompt. Nothing already written is overwritten: an
+existing `settings.json` is reported rather than edited. Pass `--no-claude` to skip the
+agent files, `--dry-run` to see what it would write.
+
+Then add the credential it names, outside the repo, and check the three things in order:
+
+```sh
+blip auth test             # the credential resolves
+blip describe --compact    # the spec is reachable
+blip envs                  # the environments are what you expect
+```
 
 ## Walkthrough
 
-Start with a service running locally. This example uses a .NET 10 minimal API on
-`https://localhost:7284`, but anything that serves an OpenAPI document works.
+The same thing done by hand, to show what `init` writes and why. This example uses a
+.NET 10 minimal API on `https://localhost:7284`, but anything serving an OpenAPI document
+works.
 
 **1. Write `.blip.toml` at your repo root and commit it.**
 
@@ -229,6 +268,7 @@ If the credentials file has any mode other than `0600`, blip refuses to read it 
 ## Use
 
 ```
+blip init <base-url>                      # scaffold .blip.toml for this repo
 blip <group> <operation> [args] [flags]   # generated from the spec
 blip call <operationId> [args] [flags]    # stable, bypasses the generated tree
 blip raw <METHOD> <PATH> [flags]          # zero-spec escape hatch
@@ -350,7 +390,8 @@ unauthenticated attempt has been refused, so a public spec never reaches for a v
 
 ## Using blip with Claude Code
 
-Drop this into your project's `CLAUDE.md`:
+`blip init` writes both of the following for you. To do it by hand, drop this into your
+project's `CLAUDE.md`:
 
 ```md
 This repo has a blip config at `.blip.toml`. To explore the API, run
