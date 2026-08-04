@@ -17,14 +17,18 @@ type SocketSource interface {
 	Listening() ([]Listener, error)
 }
 
-// ListenersUnder keeps src's listeners owned by a process inside repoRoot, deduped by port.
+// ListenersUnder filters src's listeners to those under repoRoot, deduped by port.
 func ListenersUnder(src SocketSource, repoRoot string) ([]Listener, error) {
+	repoRoot, err := canonical(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+
 	all, err := src.Listening()
 	if err != nil {
 		return nil, err
 	}
 
-	repoRoot = filepath.Clean(repoRoot)
 	seenPorts := map[int]bool{}
 	var out []Listener
 	for _, l := range all {
@@ -38,6 +42,15 @@ func ListenersUnder(src SocketSource, repoRoot string) ([]Listener, error) {
 		out = append(out, l)
 	}
 	return out, nil
+}
+
+// canonical matches repoRoot's form to an already-canonical /proc cwd.
+func canonical(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
 }
 
 func underRoot(repoRoot, cwd string) bool {

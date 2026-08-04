@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Listening reads listening sockets from /proc; a pid it cannot read is skipped, not an error.
+// Listening reads /proc; a pid it cannot read is skipped, not an error.
 func (procSource) Listening() ([]Listener, error) {
 	owners := socketOwners()
 
