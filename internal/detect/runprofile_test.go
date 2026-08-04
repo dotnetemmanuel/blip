@@ -22,9 +22,7 @@ func TestReadRunProfileAspNetOpenAPIRealLaunchSettings(t *testing.T) {
 }
 
 func TestReadRunProfileAspNetSkipsNonProjectProfileAndPrefersHTTPS(t *testing.T) {
-	// aspnet-swashbuckle/Properties/launchSettings.json lists "IIS Express" (commandName
-	// IISExpress) first, the classic real-world ordering, then "Legacy.Api" (commandName
-	// Project) with applicationUrl "http://...;https://..." and no environmentVariables key.
+	// Two non-Project profiles precede the Project one, so a map-based regression that drops file order fails reliably rather than half the time.
 	fw := detectOne(t, "aspnet-swashbuckle")
 	got, ok := ReadRunProfile(testdata("aspnet-swashbuckle"), fw)
 	if !ok {
@@ -97,6 +95,37 @@ func TestReadRunProfileAspNetNoProjectProfileAtAllIsNoProfile(t *testing.T) {
 	}
 }
 
+func TestReadRunProfileAspNetEnvWithoutURLStillReturnsProfile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "Properties"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{
+  "profiles": {
+    "Api": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "Properties", "launchSettings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw := Framework{Name: "aspnet-openapi", Dir: "."}
+	got, ok := ReadRunProfile(dir, fw)
+	if !ok {
+		t.Fatalf("ReadRunProfile: ok = false, want true (environmentVariables were found, only applicationUrl is missing)")
+	}
+	if got.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want empty (caller should fall back to DefaultPort)", got.BaseURL)
+	}
+	if got.Env["ASPNETCORE_ENVIRONMENT"] != "Development" {
+		t.Errorf("Env[ASPNETCORE_ENVIRONMENT] = %q, want %q", got.Env["ASPNETCORE_ENVIRONMENT"], "Development")
+	}
+}
+
 func TestReadRunProfileNode(t *testing.T) {
 	fw := detectOne(t, "nestjs")
 	got, ok := ReadRunProfile(testdata("nestjs"), fw)
@@ -125,27 +154,53 @@ func TestReadRunProfileNodeNoEnvFileIsNoProfile(t *testing.T) {
 	}
 }
 
-func TestReadRunProfileNodeMissingPortInEnvIsNoProfile(t *testing.T) {
+func TestReadRunProfileNodeMissingPortStillReturnsEnv(t *testing.T) {
+	// process.env.PORT || 3000 in app code means .env can lack PORT, but the secrets in it still matter.
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("NODE_ENV=development\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("NODE_ENV=development\nDATABASE_URL=postgres://localhost/app\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fw := Framework{Name: "nestjs", Dir: "."}
-	_, ok := ReadRunProfile(dir, fw)
-	if ok {
-		t.Errorf("ReadRunProfile: ok = true, want false (.env has no PORT)")
+	got, ok := ReadRunProfile(dir, fw)
+	if !ok {
+		t.Fatalf("ReadRunProfile: ok = false, want true (.env has real content, just no PORT)")
+	}
+	if got.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want empty (caller should fall back to DefaultPort)", got.BaseURL)
+	}
+	want := map[string]string{"NODE_ENV": "development", "DATABASE_URL": "postgres://localhost/app"}
+	if !reflect.DeepEqual(got.Env, want) {
+		t.Errorf("Env = %v, want %v", got.Env, want)
 	}
 }
 
-func TestReadRunProfileNodeMalformedPortIsNoProfile(t *testing.T) {
+func TestReadRunProfileNodeMalformedPortStillReturnsEnv(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("PORT=not-a-number\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("PORT=not-a-number\nNODE_ENV=development\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw := Framework{Name: "nestjs", Dir: "."}
+	got, ok := ReadRunProfile(dir, fw)
+	if !ok {
+		t.Fatalf("ReadRunProfile: ok = false, want true (NODE_ENV was still read)")
+	}
+	if got.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want empty (PORT is not numeric)", got.BaseURL)
+	}
+	if got.Env["NODE_ENV"] != "development" {
+		t.Errorf("Env[NODE_ENV] = %q, want %q", got.Env["NODE_ENV"], "development")
+	}
+}
+
+func TestReadRunProfileNodeEmptyEnvFileIsNoProfile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("# nothing to see here\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fw := Framework{Name: "nestjs", Dir: "."}
 	_, ok := ReadRunProfile(dir, fw)
 	if ok {
-		t.Errorf("ReadRunProfile: ok = true, want false (PORT is not numeric)")
+		t.Errorf("ReadRunProfile: ok = true, want false (.env has no usable content)")
 	}
 }
 
@@ -173,6 +228,25 @@ func TestReadRunProfileSpring(t *testing.T) {
 	}
 }
 
+func TestReadRunProfileSpringPropertiesWithoutPortStillReturnsEnv(t *testing.T) {
+	dir := t.TempDir()
+	props := "spring.application.name=catalog\nspring.datasource.url=jdbc:postgresql://localhost/catalog\n"
+	if err := os.WriteFile(filepath.Join(dir, "application.properties"), []byte(props), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw := Framework{Name: "spring-maven", Dir: "."}
+	got, ok := ReadRunProfile(dir, fw)
+	if !ok {
+		t.Fatalf("ReadRunProfile: ok = false, want true (properties were found, only server.port is missing)")
+	}
+	if got.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want empty (caller should fall back to DefaultPort)", got.BaseURL)
+	}
+	if got.Env["spring.application.name"] != "catalog" {
+		t.Errorf("Env[spring.application.name] = %q, want %q", got.Env["spring.application.name"], "catalog")
+	}
+}
+
 func TestReadRunProfileSpringMalformedYAMLIsNoProfile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "application.yml"), []byte("server: [unterminated"), 0o644); err != nil {
@@ -195,8 +269,7 @@ func TestReadRunProfileSpringNoConfigFileIsNoProfile(t *testing.T) {
 }
 
 func TestReadRunProfileUnsupportedFrameworkIsNoProfile(t *testing.T) {
-	// go-swaggo and rust-utoipa have no run profile reader; every project of that
-	// type must fall back to the framework's DefaultPort, never error.
+	// go-swaggo and rust-utoipa have no run profile reader, so both fall back to DefaultPort.
 	for _, dir := range []string{"go-swaggo", "rust-utoipa"} {
 		t.Run(dir, func(t *testing.T) {
 			fw := detectOne(t, dir)
