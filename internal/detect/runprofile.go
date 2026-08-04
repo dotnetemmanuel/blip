@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,13 +12,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// RunProfile is the port and environment a project actually uses when run locally, not its framework's generic default.
+// RunProfile is a project's actual local port and process environment.
 type RunProfile struct {
 	BaseURL string
 	Env     map[string]string
 }
 
-// ReadRunProfile reads fw's run configuration; BaseURL is empty when the port is unknown, and ok is false only when nothing was found at all.
+// ReadRunProfile: BaseURL empty means unknown port, ok false means nothing found.
 func ReadRunProfile(repoRoot string, fw Framework) (RunProfile, bool) {
 	dir := filepath.Join(repoRoot, fw.Dir)
 	switch fw.Name {
@@ -33,7 +32,7 @@ func ReadRunProfile(repoRoot string, fw Framework) (RunProfile, bool) {
 	return RunProfile{}, false
 }
 
-// asRunProfile applies the shared contract: an empty result is no profile, anything else is one.
+// asRunProfile: false only when both baseURL and env are empty.
 func asRunProfile(baseURL string, env map[string]string) (RunProfile, bool) {
 	if baseURL == "" && len(env) == 0 {
 		return RunProfile{}, false
@@ -63,7 +62,7 @@ type launchProfile struct {
 	EnvironmentVariables map[string]string `json:"environmentVariables"`
 }
 
-// firstProjectProfile walks the raw JSON tokens in file order to find the first commandName Project profile, since a map would lose that order.
+// firstProjectProfile keeps file order, since decoding to a map would lose it.
 func firstProjectProfile(data []byte) (string, map[string]string, bool) {
 	var doc struct {
 		Profiles json.RawMessage `json:"profiles"`
@@ -145,74 +144,51 @@ var springConfigPaths = []string{
 	"application.properties",
 }
 
-// readSpringConfig prefers a candidate declaring server.port, else surfaces the first candidate's other properties.
 func readSpringConfig(dir string) (RunProfile, bool) {
-	var fallback map[string]string
 	for _, rel := range springConfigPaths {
 		data, err := os.ReadFile(filepath.Join(dir, rel))
 		if err != nil {
 			continue
 		}
-		env, ok := springProperties(rel, data)
+		port, ok := springPort(rel, data)
 		if !ok {
 			continue
 		}
-		if port, ok := env["server.port"]; ok {
-			if _, err := strconv.Atoi(port); err == nil {
-				return RunProfile{BaseURL: "http://localhost:" + port, Env: env}, true
-			}
-		}
-		if fallback == nil && len(env) > 0 {
-			fallback = env
-		}
+		return RunProfile{BaseURL: "http://localhost:" + strconv.Itoa(port)}, true
 	}
-	return asRunProfile("", fallback)
+	return RunProfile{}, false
 }
 
-func springProperties(name string, data []byte) (map[string]string, bool) {
+func springPort(name string, data []byte) (int, bool) {
 	if strings.HasSuffix(name, ".properties") {
-		return parsePropertiesFile(data), true
+		return springPropertiesPort(data)
 	}
-	return parseSpringYAML(data)
+	return springYAMLPort(data)
 }
 
-func parsePropertiesFile(data []byte) map[string]string {
-	env := map[string]string{}
+func springYAMLPort(data []byte) (int, bool) {
+	var doc struct {
+		Server struct {
+			Port int `yaml:"port"`
+		} `yaml:"server"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil || doc.Server.Port == 0 {
+		return 0, false
+	}
+	return doc.Server.Port, true
+}
+
+func springPropertiesPort(data []byte) (int, bool) {
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if !found || strings.TrimSpace(key) != "server.port" {
 			continue
 		}
-		key, value, found := strings.Cut(line, "=")
-		if !found {
-			continue
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return 0, false
 		}
-		env[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		return port, true
 	}
-	return env
-}
-
-func parseSpringYAML(data []byte) (map[string]string, bool) {
-	var doc map[string]any
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, false
-	}
-	env := map[string]string{}
-	flattenYAML("", doc, env)
-	return env, true
-}
-
-// flattenYAML turns nested YAML into Spring's own dotted-key property form, e.g. server.port.
-func flattenYAML(prefix string, node map[string]any, out map[string]string) {
-	for k, v := range node {
-		key := k
-		if prefix != "" {
-			key = prefix + "." + k
-		}
-		if nested, ok := v.(map[string]any); ok {
-			flattenYAML(key, nested, out)
-			continue
-		}
-		out[key] = fmt.Sprint(v)
-	}
+	return 0, false
 }

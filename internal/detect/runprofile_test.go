@@ -22,7 +22,7 @@ func TestReadRunProfileAspNetOpenAPIRealLaunchSettings(t *testing.T) {
 }
 
 func TestReadRunProfileAspNetSkipsNonProjectProfileAndPrefersHTTPS(t *testing.T) {
-	// Two non-Project profiles precede the Project one, so a map-based regression that drops file order fails reliably rather than half the time.
+	// Two non-Project profiles precede the Project one to catch a map-order regression.
 	fw := detectOne(t, "aspnet-swashbuckle")
 	got, ok := ReadRunProfile(testdata("aspnet-swashbuckle"), fw)
 	if !ok {
@@ -155,7 +155,7 @@ func TestReadRunProfileNodeNoEnvFileIsNoProfile(t *testing.T) {
 }
 
 func TestReadRunProfileNodeMissingPortStillReturnsEnv(t *testing.T) {
-	// process.env.PORT || 3000 in app code means .env can lack PORT, but the secrets in it still matter.
+	// .env can omit PORT (process.env.PORT || 3000 in code) while secrets still matter.
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("NODE_ENV=development\nDATABASE_URL=postgres://localhost/app\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -224,26 +224,45 @@ func TestReadRunProfileSpring(t *testing.T) {
 			if got.BaseURL != tt.want {
 				t.Errorf("BaseURL = %q, want %q", got.BaseURL, tt.want)
 			}
+			if got.Env != nil {
+				t.Errorf("Env = %v, want nil (Spring config is not process environment)", got.Env)
+			}
 		})
 	}
 }
 
-func TestReadRunProfileSpringPropertiesWithoutPortStillReturnsEnv(t *testing.T) {
+func TestReadRunProfileSpringPropertiesWithoutPortIsNoProfile(t *testing.T) {
 	dir := t.TempDir()
 	props := "spring.application.name=catalog\nspring.datasource.url=jdbc:postgresql://localhost/catalog\n"
 	if err := os.WriteFile(filepath.Join(dir, "application.properties"), []byte(props), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fw := Framework{Name: "spring-maven", Dir: "."}
+	_, ok := ReadRunProfile(dir, fw)
+	if ok {
+		t.Errorf("ReadRunProfile: ok = true, want false (no candidate declares server.port)")
+	}
+}
+
+func TestReadRunProfileSpringLaterCandidateSuppliesPort(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src", "main", "resources"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	noPort := "spring:\n  application:\n    name: catalog\n"
+	if err := os.WriteFile(filepath.Join(dir, "src", "main", "resources", "application.yml"), []byte(noPort), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "application.properties"), []byte("server.port=9090\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw := Framework{Name: "spring-maven", Dir: "."}
 	got, ok := ReadRunProfile(dir, fw)
 	if !ok {
-		t.Fatalf("ReadRunProfile: ok = false, want true (properties were found, only server.port is missing)")
+		t.Fatalf("ReadRunProfile: ok = false, want true (the root application.properties has server.port)")
 	}
-	if got.BaseURL != "" {
-		t.Errorf("BaseURL = %q, want empty (caller should fall back to DefaultPort)", got.BaseURL)
-	}
-	if got.Env["spring.application.name"] != "catalog" {
-		t.Errorf("Env[spring.application.name] = %q, want %q", got.Env["spring.application.name"], "catalog")
+	if got.BaseURL != "http://localhost:9090" {
+		t.Errorf("BaseURL = %q, want %q", got.BaseURL, "http://localhost:9090")
 	}
 }
 
