@@ -49,6 +49,7 @@ func NewRootCommand(rt *Runtime) *cobra.Command {
 		newSpecCommand(rt),
 		newDescribeCommand(rt),
 		newInitCommand(rt),
+		newUICommand(rt),
 	)
 
 	return root

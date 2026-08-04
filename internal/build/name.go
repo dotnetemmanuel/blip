@@ -17,6 +17,7 @@ var Reserved = map[string]bool{
 	"spec":     true,
 	"describe": true,
 	"call":     true,
+	"ui":       true,
 	"help":     true,
 	"blip":     true,
 }

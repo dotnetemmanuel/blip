@@ -16,6 +16,7 @@ var specless = map[string]bool{
 	"auth":       true,
 	"raw":        true,
 	"spec":       true,
+	"ui":         true,
 	"help":       true,
 	"completion": true,
 }
