@@ -1,0 +1,5 @@
+name = "configwins"
+default_env = "dev"
+
+[env.dev]
+base_url = "http://localhost:9"

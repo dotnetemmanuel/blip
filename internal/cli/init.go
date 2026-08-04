@@ -216,7 +216,7 @@ func (rt *Runtime) probeSpec(cmd *cobra.Command, base *url.URL) string {
 		return ""
 	}
 
-	found, ok := spec.Probe(cmd.Context(), client, base, append(append([]string{}, spec.ProbePaths...), extraProbePaths...))
+	found, ok := spec.Probe(cmd.Context(), client, base, append(append([]string{}, spec.ProbePaths...), spec.ExtraProbePaths...))
 	if !ok {
 		rt.Warnf("no spec found at %s; blip will probe again on each run, or set spec_url, or declare [[route]] entries", base)
 		return ""
@@ -229,16 +229,6 @@ func (rt *Runtime) probeSpec(cmd *cobra.Command, base *url.URL) string {
 		return ""
 	}
 	return path
-}
-
-// extraProbePaths are places other stacks publish a spec. blip does not probe
-// these at run time, so finding one here is exactly what has to be written down.
-var extraProbePaths = []string{
-	"/openapi.json",
-	"/swagger.json",
-	"/v3/api-docs",
-	"/api-docs",
-	"/openapi.yaml",
 }
 
 func isProbePath(path string) bool {

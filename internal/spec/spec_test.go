@@ -429,8 +429,8 @@ func TestLooksLikeSpec(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := looksLikeSpec([]byte(tt.body)); got != tt.want {
-				t.Errorf("looksLikeSpec = %v, want %v", got, tt.want)
+			if got := LooksLikeSpec([]byte(tt.body)); got != tt.want {
+				t.Errorf("LooksLikeSpec = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -17,6 +17,9 @@ type SocketSource interface {
 	Listening() ([]Listener, error)
 }
 
+// NewSocketSource is the real source, for callers outside this package.
+func NewSocketSource() SocketSource { return procSource{} }
+
 // ListenersUnder filters src's listeners to those under repoRoot, deduped by port.
 func ListenersUnder(src SocketSource, repoRoot string) ([]Listener, error) {
 	repoRoot, err := canonical(repoRoot)

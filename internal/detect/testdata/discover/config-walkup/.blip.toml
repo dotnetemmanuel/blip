@@ -1,0 +1,5 @@
+name = "walkup"
+default_env = "dev"
+
+[env.dev]
+base_url = "http://localhost:9"

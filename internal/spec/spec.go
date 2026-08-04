@@ -33,6 +33,15 @@ var ProbePaths = []string{
 	"/swagger/v1/swagger.yaml",
 }
 
+// ExtraProbePaths are places other stacks publish a spec; blip's own runtime does not probe them.
+var ExtraProbePaths = []string{
+	"/openapi.json",
+	"/swagger.json",
+	"/v3/api-docs",
+	"/api-docs",
+	"/openapi.yaml",
+}
+
 // NegativeTTL is how long blip remembers that an environment serves no spec.
 // Without it, a config that declares routes instead of a spec would pay for four
 // failed probes on every single command.
@@ -107,7 +116,7 @@ func Probe(ctx context.Context, client *http.Client, base *url.URL, paths []stri
 
 	for _, candidate := range candidates {
 		status, body, _, err := f.get(ctx, candidate, "", false, base)
-		if err != nil || status != http.StatusOK || !looksLikeSpec(body) {
+		if err != nil || status != http.StatusOK || !LooksLikeSpec(body) {
 			continue
 		}
 		return candidate, true
@@ -204,7 +213,7 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 			return &Spec{Data: cached, Meta: merged, Path: specPath(dir), Status: StatusRevalidated}, nil
 
 		case status == http.StatusOK:
-			if !looksLikeSpec(body) {
+			if !LooksLikeSpec(body) {
 				reachable = append(reachable, fmt.Sprintf("%s (200 but not an OpenAPI document)", candidate))
 				continue
 			}
@@ -413,8 +422,8 @@ func mergeMeta(cached, fresh Meta) Meta {
 	return fresh
 }
 
-// looksLikeSpec keeps blip from caching an HTML error page that came back 200.
-func looksLikeSpec(body []byte) bool {
+// LooksLikeSpec keeps blip from caching an HTML error page that came back 200.
+func LooksLikeSpec(body []byte) bool {
 	var doc map[string]any
 	if err := json.Unmarshal(body, &doc); err != nil {
 		// YAML is not only served from a .yaml path, so try it whatever the URL.

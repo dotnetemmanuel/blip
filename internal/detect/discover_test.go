@@ -1,0 +1,445 @@
+package detect
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func writeAspNetFixture(t *testing.T, dir, applicationURL string) {
+	t.Helper()
+	csproj := `<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
+  </ItemGroup>
+</Project>
+`
+	if err := os.WriteFile(filepath.Join(dir, "Api.csproj"), []byte(csproj), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if applicationURL == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "Properties"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := fmt.Sprintf(`{"profiles":{"Api":{"commandName":"Project","applicationUrl":%q}}}`, applicationURL)
+	if err := os.WriteFile(filepath.Join(dir, "Properties", "launchSettings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFastAPIFixture(t *testing.T, dir string) {
+	t.Helper()
+	pyproject := `[project]
+name = "catalog"
+dependencies = ["fastapi>=0.115"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(pyproject), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// failingTransport fails the test if a request is ever sent through it.
+type failingTransport struct{ t *testing.T }
+
+func (f failingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.t.Fatalf("unexpected network call to %s", req.URL)
+	return nil, nil
+}
+
+func noNetworkClient(t *testing.T) *http.Client {
+	return &http.Client{Transport: failingTransport{t}}
+}
+
+func serverPort(t *testing.T, srv *httptest.Server) int {
+	t.Helper()
+	addr, ok := srv.Listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", srv.Listener.Addr())
+	}
+	return addr.Port
+}
+
+func openAPIHandler(path string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openapi":"3.0.0","info":{"title":"Api","version":"1.0"},"paths":{}}`))
+	})
+	return mux
+}
+
+func notFoundHandler() http.Handler {
+	return http.NewServeMux() // an empty mux 404s everything
+}
+
+// pathRecorder records the order requests arrived in, for asserting probe order.
+type pathRecorder struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (r *pathRecorder) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		r.paths = append(r.paths, req.URL.Path)
+		r.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (r *pathRecorder) indexOf(path string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, p := range r.paths {
+		if p == path {
+			return i
+		}
+	}
+	return -1
+}
+
+// redirectClient dials target regardless of the requested host.
+func redirectClient(target string) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, target)
+	}
+	return &http.Client{Transport: transport}
+}
+
+func TestDiscoverConfigWins(t *testing.T) {
+	root := testdata("discover/config-wins")
+	targets, ledger, err := Discover(context.Background(), root, noNetworkClient(t), fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want 1: %+v", len(targets), targets)
+	}
+	if targets[0].Title != "configwins" {
+		t.Errorf("Title = %q, want %q", targets[0].Title, "configwins")
+	}
+	if targets[0].BaseURL != "http://localhost:9" {
+		t.Errorf("BaseURL = %q, want %q", targets[0].BaseURL, "http://localhost:9")
+	}
+	if len(ledger.Attempts) != 1 || ledger.Attempts[0].Rung != RungConfig {
+		t.Fatalf("ledger = %+v, want exactly one config attempt (the spec file must never be consulted)", ledger.Attempts)
+	}
+}
+
+func TestDiscoverConfigWalksUpFromSubdirectory(t *testing.T) {
+	root := testdata("discover/config-walkup/sub")
+	targets, _, err := Discover(context.Background(), root, noNetworkClient(t), fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 1 || targets[0].Title != "walkup" {
+		t.Fatalf("got %+v, want the config found by walking up from the subdirectory", targets)
+	}
+}
+
+func TestDiscoverSpecFileNoNetworkCall(t *testing.T) {
+	root := testdata("discover/spec-file-only")
+	targets, ledger, err := Discover(context.Background(), root, noNetworkClient(t), fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want 1: %+v", len(targets), targets)
+	}
+	want := filepath.Join(root, "openapi.json")
+	if targets[0].SpecURL != want {
+		t.Errorf("SpecURL = %q, want %q", targets[0].SpecURL, want)
+	}
+	if targets[0].Title != "Test API" {
+		t.Errorf("Title = %q, want %q", targets[0].Title, "Test API")
+	}
+	if len(ledger.Attempts) != 2 {
+		t.Errorf("ledger = %+v, want a config miss then a spec-file hit", ledger.Attempts)
+	}
+}
+
+func TestDiscoverRung4Hit(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(openAPIHandler("/openapi/v1.json"))
+	defer srv.Close()
+	writeAspNetFixture(t, dir, srv.URL)
+
+	targets, ledger, err := Discover(context.Background(), dir, srv.Client(), fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want 1: %+v", len(targets), targets)
+	}
+	wantSpec := srv.URL + "/openapi/v1.json"
+	if targets[0].SpecURL != wantSpec {
+		t.Errorf("SpecURL = %q, want %q", targets[0].SpecURL, wantSpec)
+	}
+
+	port := strconv.Itoa(serverPort(t, srv))
+	found := false
+	for _, a := range ledger.Attempts {
+		if a.Rung == RungProbe && strings.Contains(a.Outcome, wantSpec) && strings.Contains(a.Detail, port) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ledger = %+v, want an attempt naming port %s and the found spec", ledger.Attempts, port)
+	}
+}
+
+func TestDiscoverRung4ReachedButNoSpec(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(notFoundHandler())
+	defer srv.Close()
+	writeAspNetFixture(t, dir, srv.URL)
+
+	targets, ledger, err := Discover(context.Background(), dir, srv.Client(), fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0: %+v", len(targets), targets)
+	}
+	found := false
+	for _, a := range ledger.Attempts {
+		if a.Rung == RungProbe && a.Outcome == "reached, served no spec" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ledger = %+v, want an attempt saying the port was reached and served no spec", ledger.Attempts)
+	}
+}
+
+func TestDiscoverRung4WrongGuessRecovered(t *testing.T) {
+	dir := t.TempDir()
+	// The run profile names a port nothing is listening on.
+	writeAspNetFixture(t, dir, "https://127.0.0.1:1")
+
+	srv := httptest.NewServer(openAPIHandler("/openapi/v1.json"))
+	defer srv.Close()
+
+	canonDir, err := canonical(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockets := fakeSource{listeners: []Listener{{Port: serverPort(t, srv), PID: 1, Cwd: canonDir}}}
+
+	targets, _, err := Discover(context.Background(), dir, srv.Client(), sockets)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want 1 (the socket source should have corrected the wrong port): %+v", len(targets), targets)
+	}
+	wantBase := fmt.Sprintf("http://localhost:%d", serverPort(t, srv))
+	if targets[0].BaseURL != wantBase {
+		t.Errorf("BaseURL = %q, want %q", targets[0].BaseURL, wantBase)
+	}
+}
+
+func TestDiscoverProbeOrderFollowsDetection(t *testing.T) {
+	t.Run("fastapi tries openapi.json first", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFastAPIFixture(t, dir)
+
+		rec := &pathRecorder{}
+		srv := httptest.NewServer(rec.handler())
+		defer srv.Close()
+
+		canonDir, err := canonical(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sockets := fakeSource{listeners: []Listener{{Port: serverPort(t, srv), PID: 1, Cwd: canonDir}}}
+
+		if _, _, err := Discover(context.Background(), dir, srv.Client(), sockets); err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+
+		openapi := rec.indexOf("/openapi.json")
+		aspnet := rec.indexOf("/openapi/v1.json")
+		if openapi < 0 || aspnet < 0 {
+			t.Fatalf("paths tried = %v, want both /openapi.json and /openapi/v1.json", rec.paths)
+		}
+		if openapi > aspnet {
+			t.Errorf("paths tried = %v, want /openapi.json before /openapi/v1.json for a detected FastAPI project", rec.paths)
+		}
+	})
+
+	t.Run("aspnet tries openapi v1 json first", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAspNetFixture(t, dir, "")
+
+		rec := &pathRecorder{}
+		srv := httptest.NewServer(rec.handler())
+		defer srv.Close()
+
+		canonDir, err := canonical(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sockets := fakeSource{listeners: []Listener{{Port: serverPort(t, srv), PID: 1, Cwd: canonDir}}}
+
+		if _, _, err := Discover(context.Background(), dir, srv.Client(), sockets); err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+
+		openapi := rec.indexOf("/openapi.json")
+		aspnet := rec.indexOf("/openapi/v1.json")
+		if openapi < 0 || aspnet < 0 {
+			t.Fatalf("paths tried = %v, want both /openapi.json and /openapi/v1.json", rec.paths)
+		}
+		if aspnet > openapi {
+			t.Errorf("paths tried = %v, want /openapi/v1.json before /openapi.json for a detected ASP.NET project", rec.paths)
+		}
+	})
+}
+
+func TestDiscoverForeignProcessExcluded(t *testing.T) {
+	dir := t.TempDir()
+	writeAspNetFixture(t, dir, "https://127.0.0.1:1") // guaranteed unreachable
+
+	var requests int
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openapi":"3.0.0"}`))
+	}))
+	defer foreign.Close()
+
+	outside := t.TempDir()
+	sockets := fakeSource{listeners: []Listener{{Port: serverPort(t, foreign), PID: 99, Cwd: outside}}}
+
+	targets, _, err := Discover(context.Background(), dir, http.DefaultClient, sockets)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0: %+v", len(targets), targets)
+	}
+	if requests != 0 {
+		t.Errorf("the foreign process received %d requests, want 0: its cwd is outside the repo", requests)
+	}
+}
+
+func TestDiscoverCertificateRule(t *testing.T) {
+	t.Run("accepted on loopback", func(t *testing.T) {
+		dir := t.TempDir()
+		srv := httptest.NewTLSServer(openAPIHandler("/openapi/v1.json"))
+		defer srv.Close()
+		writeAspNetFixture(t, dir, srv.URL) // srv.URL hosts on 127.0.0.1
+
+		targets, _, err := Discover(context.Background(), dir, &http.Client{}, fakeSource{})
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		if len(targets) != 1 {
+			t.Fatalf("got %d targets, want 1 (a self-signed cert on loopback must be accepted): %+v", len(targets), targets)
+		}
+	})
+
+	t.Run("refused off loopback", func(t *testing.T) {
+		dir := t.TempDir()
+		srv := httptest.NewUnstartedServer(openAPIHandler("/openapi/v1.json"))
+		// The expected refusal below logs a server-side TLS alert; silence it.
+		srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+		srv.StartTLS()
+		defer srv.Close()
+
+		port := serverPort(t, srv)
+		applicationURL := fmt.Sprintf("https://example.internal:%d", port)
+		writeAspNetFixture(t, dir, applicationURL)
+
+		client := redirectClient(srv.Listener.Addr().String())
+		targets, ledger, err := Discover(context.Background(), dir, client, fakeSource{})
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		if len(targets) != 0 {
+			t.Fatalf("got %d targets, want 0 (a self-signed cert off loopback must be refused): %+v", len(targets), targets)
+		}
+		found := false
+		for _, a := range ledger.Attempts {
+			if a.Rung == RungProbe && strings.Contains(a.Outcome, "certificate rejected") && strings.Contains(a.Outcome, "example.internal") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("ledger = %+v, want an attempt naming the certificate refusal and the non-loopback host", ledger.Attempts)
+		}
+	})
+}
+
+func TestDiscoverTotalFailure(t *testing.T) {
+	dir := t.TempDir()
+	targets, ledger, err := Discover(context.Background(), dir, http.DefaultClient, fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0: %+v", len(targets), targets)
+	}
+	if len(ledger.Attempts) != 4 {
+		t.Fatalf("got %d ledger attempts, want 4 (one per rung): %+v", len(ledger.Attempts), ledger.Attempts)
+	}
+	for _, a := range ledger.Attempts {
+		if strings.TrimSpace(a.Outcome) == "" {
+			t.Errorf("attempt %+v has an empty outcome", a)
+		}
+	}
+}
+
+func TestDiscoverNoFalsePositiveOnBundlerOnly(t *testing.T) {
+	targets, _, err := Discover(context.Background(), testdata("frontend"), http.DefaultClient, fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0 (a plain package.json is not evidence of an API): %+v", len(targets), targets)
+	}
+}
+
+func TestDiscoverMonorepoTwoProjects(t *testing.T) {
+	root := testdata("monorepo")
+	ordersCanon, err := canonical(filepath.Join(root, "orders"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogCanon, err := canonical(filepath.Join(root, "catalog"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orders := httptest.NewServer(openAPIHandler("/openapi/v1.json"))
+	defer orders.Close()
+	catalog := httptest.NewServer(openAPIHandler("/openapi.json"))
+	defer catalog.Close()
+
+	sockets := fakeSource{listeners: []Listener{
+		{Port: serverPort(t, orders), PID: 1, Cwd: ordersCanon},
+		{Port: serverPort(t, catalog), PID: 2, Cwd: catalogCanon},
+	}}
+
+	targets, _, err := Discover(context.Background(), root, http.DefaultClient, sockets)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("got %d targets, want 2: %+v", len(targets), targets)
+	}
+}
