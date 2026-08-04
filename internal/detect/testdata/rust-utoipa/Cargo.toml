@@ -1,0 +1,6 @@
+[package]
+name = "orders"
+
+[dependencies]
+utoipa = "5"
+axum = "0.7"

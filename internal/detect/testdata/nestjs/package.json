@@ -1,0 +1,7 @@
+{
+  "name": "orders",
+  "dependencies": {
+    "@nestjs/core": "^10.0.0",
+    "@nestjs/swagger": "^7.4.0"
+  }
+}

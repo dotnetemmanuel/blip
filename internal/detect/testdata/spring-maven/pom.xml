@@ -1,0 +1,9 @@
+<project>
+  <artifactId>catalog</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+  </dependencies>
+</project>
