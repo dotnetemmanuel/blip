@@ -418,22 +418,32 @@ func sendability(base string) (baseURL string, env *config.Environment, unsendab
 	}, ""
 }
 
-// probeOutcome keeps found, reached and tlsRefused separate for a precise ledger.
+// probeOutcome keeps each cause separate, so the ledger states, not guesses.
 type probeOutcome struct {
-	specURL    string
-	found      bool
-	reached    bool
-	tlsRefused bool
+	specURL         string
+	found           bool
+	reached         bool
+	tlsRefused      bool
+	redirectRefused bool
+	lastErr         error
 }
 
 func outcomeMessage(o probeOutcome, base string) string {
 	switch {
 	case o.found:
 		return "found a spec at " + o.specURL
+	case o.redirectRefused:
+		return "redirect refused: " + o.lastErr.Error()
 	case o.tlsRefused:
-		return fmt.Sprintf("certificate rejected: %s is not loopback, self-signed not accepted", hostOf(base))
+		host := hostOf(base)
+		if !config.IsLocalHost(host) {
+			return fmt.Sprintf("certificate rejected: %s is not loopback, self-signed not accepted", host)
+		}
+		return fmt.Sprintf("certificate rejected at %s: TLS could not be relaxed for this client", host)
 	case o.reached:
 		return "reached, served no spec"
+	case o.lastErr != nil:
+		return "failed: " + o.lastErr.Error()
 	default:
 		return "nothing listening there"
 	}
@@ -454,7 +464,11 @@ func probeGuess(ctx context.Context, client *http.Client, base string, paths []s
 		candidate := strings.TrimSuffix(base, "/") + p
 		status, body, finalURL, err := getCandidate(ctx, client, candidate)
 		if err != nil {
-			if isCertRefusal(err) {
+			out.lastErr = err
+			switch {
+			case errors.Is(err, request.ErrRedirectRefused):
+				out.redirectRefused = true
+			case isCertRefusal(err):
 				out.tlsRefused = true
 			}
 			continue
@@ -502,16 +516,22 @@ func isCertRefusal(err error) bool {
 	return errors.As(err, &unknownAuthority) || errors.As(err, &invalid) || errors.As(err, &hostname)
 }
 
-// clientForCandidate relaxes TLS only for an https loopback candidate.
+// clientForCandidate always applies the redirect policy, and relaxes loopback https.
 func clientForCandidate(base *http.Client, candidate string) *http.Client {
 	u, err := url.Parse(candidate)
-	if err != nil || u.Scheme != "https" || !config.IsLocalHost(u.Hostname()) {
-		return base
+	if err == nil && u.Scheme == "https" && config.IsLocalHost(u.Hostname()) {
+		if relaxed, ok := insecureVariant(base); ok {
+			return relaxed
+		}
 	}
-	if relaxed, ok := insecureVariant(base); ok {
-		return relaxed
-	}
-	return base
+	return withRedirectPolicy(base)
+}
+
+// withRedirectPolicy stops any probe, relaxed or not, from being redirected off host.
+func withRedirectPolicy(base *http.Client) *http.Client {
+	clone := *base
+	clone.CheckRedirect = request.CheckRedirect
+	return &clone
 }
 
 // ok is false rather than substituting a transport, so a caller's is never dropped.

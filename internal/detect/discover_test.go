@@ -520,13 +520,58 @@ func TestDiscoverRedirectOffLoopbackIsRefused(t *testing.T) {
 	writeAspNetFixture(t, dir, loopback.URL)
 
 	client := hostMappingClient(map[string]string{"evil.internal": evil.Listener.Addr().String()})
-	targets, _, err := Discover(context.Background(), dir, client, fakeSource{})
+	targets, ledger, err := Discover(context.Background(), dir, client, fakeSource{})
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
 	if len(targets) != 0 {
 		t.Fatalf("got %d targets, want 0: a cross-host redirect off loopback must be refused, not adopted", len(targets))
 	}
+	assertRedirectRefusedNotSilent(t, ledger)
+}
+
+// assertRedirectRefusedNotSilent catches the refusal being reported as "nothing listening there".
+func assertRedirectRefusedNotSilent(t *testing.T, ledger Ledger) {
+	t.Helper()
+	found := false
+	for _, a := range ledger.Attempts {
+		if a.Rung != RungProbe {
+			continue
+		}
+		if strings.Contains(a.Outcome, "nothing listening") {
+			t.Errorf("outcome = %q, want it to say the redirect was refused: something did answer", a.Outcome)
+		}
+		if strings.HasPrefix(a.Outcome, "redirect refused") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ledger = %+v, want an attempt saying the redirect was refused", ledger.Attempts)
+	}
+}
+
+func TestDiscoverPlainHTTPRedirectOffHostIsRefused(t *testing.T) {
+	dir := t.TempDir()
+
+	foreign := httptest.NewServer(openAPIHandler("/openapi.json"))
+	defer foreign.Close()
+
+	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://foreign.internal/openapi.json", http.StatusFound)
+	}))
+	defer loopback.Close()
+
+	writeAspNetFixture(t, dir, loopback.URL)
+
+	client := hostMappingClient(map[string]string{"foreign.internal": foreign.Listener.Addr().String()})
+	targets, ledger, err := Discover(context.Background(), dir, client, fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0: a plain http cross-host redirect must be refused, not adopted", len(targets))
+	}
+	assertRedirectRefusedNotSilent(t, ledger)
 }
 
 func TestDiscoverRedirectSameHostRecordsFinalURL(t *testing.T) {
@@ -563,7 +608,7 @@ func TestDiscoverPreservesCallerTransport(t *testing.T) {
 	writeAspNetFixture(t, dir, srv.URL)
 
 	spy := &spyTransport{inner: http.DefaultTransport}
-	targets, _, err := Discover(context.Background(), dir, &http.Client{Transport: spy}, fakeSource{})
+	targets, ledger, err := Discover(context.Background(), dir, &http.Client{Transport: spy}, fakeSource{})
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -572,6 +617,12 @@ func TestDiscoverPreservesCallerTransport(t *testing.T) {
 	}
 	if spy.calls == 0 {
 		t.Errorf("the caller's transport was never used; it must not be dropped when TLS cannot be relaxed")
+	}
+	// The host really is loopback; the message must not claim otherwise.
+	for _, a := range ledger.Attempts {
+		if a.Rung == RungProbe && strings.Contains(a.Outcome, "is not loopback") {
+			t.Errorf("outcome = %q, want no false loopback claim: relaxation failed for another reason", a.Outcome)
+		}
 	}
 }
 
