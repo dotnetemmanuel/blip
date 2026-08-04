@@ -32,6 +32,13 @@ func TestDetectFrameworksOneProjectFixtures(t *testing.T) {
 		startCommand []string
 	}{
 		{
+			dir:          "spring-gradle-kts",
+			name:         "spring-gradle",
+			specPaths:    []string{"/v3/api-docs"},
+			defaultPort:  8080,
+			startCommand: []string{"./gradlew", "bootRun"},
+		},
+		{
 			dir:          "aspnet-openapi",
 			name:         "aspnet-openapi",
 			specPaths:    []string{"/openapi/v1.json", "/openapi/v1.yaml"},
@@ -109,6 +116,9 @@ func TestDetectFrameworksOneProjectFixtures(t *testing.T) {
 			if !reflect.DeepEqual(fw.StartCommand, tt.startCommand) {
 				t.Errorf("StartCommand = %v, want %v", fw.StartCommand, tt.startCommand)
 			}
+			if fw.Dir != "." {
+				t.Errorf("Dir = %q, want %q (the manifest sits at the fixture root)", fw.Dir, ".")
+			}
 		})
 	}
 }
@@ -143,12 +153,24 @@ func TestDetectFrameworksMonorepoReturnsOnePerProject(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d frameworks, want 2: %+v", len(got), got)
 	}
-	names := map[string]bool{}
+	dirs := map[string]string{}
 	for _, fw := range got {
-		names[fw.Name] = true
+		dirs[fw.Name] = fw.Dir
 	}
-	if !names["aspnet-openapi"] || !names["fastapi"] {
-		t.Errorf("got names %v, want aspnet-openapi and fastapi (web's plain package.json must not appear)", names)
+	if dirs["aspnet-openapi"] != "orders" || dirs["fastapi"] != "catalog" {
+		t.Errorf("got dirs %v, want aspnet-openapi in \"orders\" and fastapi in \"catalog\" (web's plain package.json must not appear)", dirs)
+	}
+}
+
+func TestDetectFrameworksDoesNotSkipByNameSubstring(t *testing.T) {
+	// "distribution" contains the skip word "dist" but is not equal to it, and
+	// must still be walked into, not skipped as if it were "dist" itself.
+	fw := detectOne(t, "skip-substring-check")
+	if fw.Name != "fastapi" {
+		t.Errorf("Name = %q, want fastapi", fw.Name)
+	}
+	if fw.Dir != "distribution" {
+		t.Errorf("Dir = %q, want %q", fw.Dir, "distribution")
 	}
 }
 

@@ -1,5 +1,4 @@
-// Package detect works out what API framework, if any, a project directory
-// runs, from the manifests it finds on disk.
+// Package detect works out what API framework a project runs from its manifests.
 package detect
 
 import (
@@ -20,14 +19,14 @@ import (
 type Framework struct {
 	Name         string
 	Manifest     string
+	Dir          string // relative to repoRoot; "." for repoRoot itself
 	SpecPaths    []string
 	DefaultPort  int
 	StartCommand []string
 	StartEnv     map[string]string
 }
 
-// skipDirs never hold a project of their own, only build output or a copy of
-// another project's manifests.
+// skipDirs hold build output or copies of another project's manifests, never a project of their own.
 var skipDirs = map[string]bool{
 	"node_modules": true,
 	"bin":          true,
@@ -41,9 +40,7 @@ var skipDirs = map[string]bool{
 	"__pycache__":  true,
 }
 
-// registry holds the parts of each Framework that never depend on the
-// project it was found in. Name, Manifest and any dynamic StartCommand are
-// filled in at match time.
+// registry holds the framework-wide parts; Manifest, Dir and any dynamic StartCommand are filled in per match.
 var registry = map[string]Framework{
 	"aspnet-openapi": {
 		Name:         "aspnet-openapi",
@@ -93,10 +90,7 @@ var registry = map[string]Framework{
 	},
 }
 
-// DetectFrameworks walks repoRoot and returns one Framework per project
-// directory found. A manifest name is never enough on its own: each match is
-// confirmed by reading the file for the dependency that actually serves a
-// spec, so a bare package.json or go.mod yields nothing.
+// DetectFrameworks returns one Framework per project directory, confirmed by content, not filename alone.
 func DetectFrameworks(repoRoot string) ([]Framework, error) {
 	byDir := map[string]Framework{}
 
@@ -117,11 +111,14 @@ func DetectFrameworks(repoRoot string) ([]Framework, error) {
 		if !ok {
 			return nil
 		}
-		dir := filepath.Dir(path)
-		// First match in a directory wins; a directory carrying evidence for
-		// two frameworks is resolved inside the manifest-specific matcher instead.
-		if _, seen := byDir[dir]; !seen {
-			byDir[dir] = fw
+		rel, err := filepath.Rel(repoRoot, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		// First match per directory wins; dual evidence is resolved in the matcher itself.
+		if _, seen := byDir[rel]; !seen {
+			fw.Dir = rel
+			byDir[rel] = fw
 		}
 		return nil
 	})
@@ -176,8 +173,7 @@ func matchCsproj(path, name string) (Framework, bool, error) {
 	}
 	content := string(data)
 	switch {
-	// Checked first: a .csproj naming both packages is mid-migration off
-	// Swashbuckle, and the built-in generator is the one that will remain.
+	// Checked first: prefer the built-in generator when a .csproj names both (mid-migration).
 	case strings.Contains(content, "Microsoft.AspNetCore.OpenApi"):
 		return withManifest(registry["aspnet-openapi"], name), true, nil
 	case strings.Contains(content, "Swashbuckle"):
@@ -207,8 +203,7 @@ func matchPyproject(path, name string) (Framework, bool, error) {
 			Dependencies []string `toml:"dependencies"`
 		} `toml:"project"`
 	}
-	// A pyproject.toml that fails to parse is not evidence of anything; skip it
-	// rather than failing the whole walk over one malformed manifest.
+	// A malformed manifest is not evidence; skip it rather than fail the whole walk.
 	if err := toml.Unmarshal(data, &doc); err != nil {
 		return Framework{}, false, nil
 	}
