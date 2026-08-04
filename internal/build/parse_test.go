@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+
+	"github.com/dotnetemmanuel/blip/internal/output"
 )
 
 func load(t *testing.T, name string) *API {
@@ -280,6 +282,52 @@ func TestFind(t *testing.T) {
 	}
 	if op := api.Find("nope"); op != nil {
 		t.Errorf("Find(nope) = %v, want nil", op)
+	}
+}
+
+func TestParseRefusesSwagger2(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "swagger20-petstore.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	api, err := Parse(data)
+	if err == nil {
+		t.Fatalf("Parse succeeded on a Swagger 2.0 document, got %d operations", len(api.Operations))
+	}
+	if !strings.Contains(err.Error(), "2.0") || !strings.Contains(err.Error(), "OpenAPI 3") {
+		t.Errorf("error = %q, want it to name the version found and say only OpenAPI 3.x is supported", err.Error())
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitConfig {
+		t.Errorf("exit code = %d, want ExitConfig (%d)", got, output.ExitConfig)
+	}
+}
+
+func TestParseRefusesSwagger1(t *testing.T) {
+	spec := `{"swagger":"1.2","info":{"title":"x","version":"1"}}`
+
+	_, err := Parse([]byte(spec))
+	if err == nil {
+		t.Fatal("Parse succeeded on a Swagger 1.2 document")
+	}
+	if !strings.Contains(err.Error(), "1.2") {
+		t.Errorf("error = %q, want it to name the version found", err.Error())
+	}
+}
+
+func TestParseDoesNotRefuseAnUnrelatedNestedSwaggerField(t *testing.T) {
+	// Only a top-level swagger key should refuse; this one is nested.
+	spec := `{"openapi":"3.0.1","info":{"title":"x","version":"1"},"paths":{
+		"/things":{"get":{"tags":["things"],"operationId":"getThings","responses":{"200":{"description":"OK",
+		"content":{"application/json":{"schema":{"type":"object","properties":{
+		"swagger":{"type":"string"}}}}}}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatalf("Parse refused a 3.x document over a nested field named swagger: %v", err)
+	}
+	if len(api.Operations) != 1 {
+		t.Errorf("operations = %d, want 1", len(api.Operations))
 	}
 }
 

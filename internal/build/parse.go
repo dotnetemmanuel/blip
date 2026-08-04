@@ -1,6 +1,7 @@
 package build
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"path"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"gopkg.in/yaml.v3"
 
 	"github.com/dotnetemmanuel/blip/internal/output"
 )
@@ -30,6 +32,12 @@ var methodOrder = []string{
 // Parse turns a raw OpenAPI document into blip's model. Operations are visited
 // in a fixed order, so a derived name never silently changes between runs.
 func Parse(data []byte) (*API, error) {
+	if version, ok := swaggerVersion(data); ok {
+		return nil, output.Configf(
+			"this document is Swagger %s, and blip only supports OpenAPI 3.x specs; "+
+				"upgrade the spec or point blip at a different one", version)
+	}
+
 	loader := openapi3.NewLoader()
 	loader.IsExternalRefsAllowed = false
 
@@ -104,6 +112,24 @@ func Parse(data []byte) (*API, error) {
 
 	sortOperations(api.Operations)
 	return api, nil
+}
+
+// The loader below is OpenAPI-3-only; a 2.0 doc would parse silently into nothing.
+func swaggerVersion(data []byte) (string, bool) {
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			return "", false
+		}
+	}
+	v, ok := doc["swagger"]
+	if !ok {
+		return "", false
+	}
+	if s, ok := v.(string); ok {
+		return s, true
+	}
+	return fmt.Sprint(v), true
 }
 
 func sortedPaths(paths *openapi3.Paths) []string {
