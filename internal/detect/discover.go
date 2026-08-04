@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/dotnetemmanuel/blip/internal/config"
+	"github.com/dotnetemmanuel/blip/internal/request"
 	"github.com/dotnetemmanuel/blip/internal/spec"
 )
 
@@ -29,12 +30,15 @@ const (
 )
 
 // Target is one API discovery found, ready to browse or send against.
+// BaseURL == "" if and only if Env == nil if and only if Unsendable != "".
 type Target struct {
-	Title     string
-	BaseURL   string
-	SpecURL   string
-	Env       *config.Environment
-	Framework *Framework
+	Title      string
+	BaseURL    string
+	SpecURL    string
+	SpecPath   string
+	Env        *config.Environment
+	Unsendable string
+	Framework  *Framework
 }
 
 // Attempt is one thing a rung of the ladder tried, and what came of it.
@@ -44,7 +48,7 @@ type Attempt struct {
 	Outcome string
 }
 
-// Ledger records every rung's attempts, so a failure can be explained, not just reported.
+// Ledger records every rung's attempts, so a failure can be explained.
 type Ledger struct {
 	Attempts []Attempt
 }
@@ -62,7 +66,7 @@ func (l Ledger) String() string {
 	return strings.Join(parts, "; ")
 }
 
-// Rung 2 only checks these locations, in this order; a deep search risks a stray fixture.
+// Rung 2 only checks these locations; a deep search risks a stray fixture.
 var specFileNames = []string{
 	"openapi.json", "openapi.yaml", "openapi.yml",
 	"swagger.json", "swagger.yaml", "swagger.yml",
@@ -74,6 +78,9 @@ var specFileDirs = []string{".", "api", "docs", "spec"}
 func Discover(ctx context.Context, repoRoot string, client *http.Client, sockets SocketSource) ([]Target, Ledger, error) {
 	if client == nil {
 		client = http.DefaultClient
+	}
+	if sockets == nil {
+		sockets = NewSocketSource()
 	}
 	var ledger Ledger
 
@@ -90,10 +97,11 @@ func Discover(ctx context.Context, repoRoot string, client *http.Client, sockets
 	}
 
 	frameworks, err := DetectFrameworks(repoRoot)
-	if err != nil {
-		return nil, ledger, err
-	}
-	if len(frameworks) == 0 {
+	switch {
+	case err != nil:
+		// Below rung 1 is inference, so a scan failure is a ledger line, not an abort.
+		ledger.record(RungFramework, "scanned manifests for a known framework", "failed: "+err.Error())
+	case len(frameworks) == 0:
 		ledger.record(RungFramework, "scanned manifests for a known framework", "none detected")
 	}
 	guesses := buildGuesses(repoRoot, frameworks)
@@ -101,26 +109,25 @@ func Discover(ctx context.Context, repoRoot string, client *http.Client, sockets
 		ledger.record(RungFramework, fmt.Sprintf("%s in %s", g.fw.Name, dirLabel(g.fw.Dir)), "guessed "+g.baseURL)
 	}
 
-	targets, err = probeRung(ctx, client, repoRoot, sockets, guesses, &ledger)
-	if err != nil {
-		return nil, ledger, err
-	}
-	return targets, ledger, nil
+	return probeRung(ctx, client, repoRoot, sockets, guesses, &ledger), ledger, nil
 }
 
-// discoverConfig is rung 1; a malformed .blip.toml errors rather than falls through.
+// discoverConfig is rung 1; a malformed .blip.toml is an error, not a fall-through.
 func discoverConfig(repoRoot string, ledger *Ledger) ([]Target, bool, error) {
+	detail := "looked for .blip.toml from " + repoRoot + " upward"
 	cfg, err := config.LoadFrom(repoRoot)
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
-			ledger.record(RungConfig, "looked for .blip.toml from "+repoRoot+" upward", "not found")
+			ledger.record(RungConfig, detail, "not found")
 			return nil, false, nil
 		}
+		ledger.record(RungConfig, detail, "failed: "+err.Error())
 		return nil, false, err
 	}
 
 	target, err := configTarget(cfg)
 	if err != nil {
+		ledger.record(RungConfig, ".blip.toml at "+cfg.Path, "failed: "+err.Error())
 		return nil, false, err
 	}
 	ledger.record(RungConfig, ".blip.toml at "+cfg.Path, "found, used directly")
@@ -143,7 +150,6 @@ func configTarget(cfg *config.Config) (Target, error) {
 // discoverSpecFiles is rung 2: a document already on disk, no network involved.
 func discoverSpecFiles(repoRoot string, ledger *Ledger) ([]Target, bool) {
 	var targets []Target
-	var found []string
 
 	for _, dir := range specFileDirs {
 		for _, name := range specFileNames {
@@ -152,12 +158,19 @@ func discoverSpecFiles(repoRoot string, ledger *Ledger) ([]Target, bool) {
 			if err != nil || info.IsDir() {
 				continue
 			}
-			isSpec, title, baseURL := parseSpecFile(path)
+			isSpec, title, servers := parseSpecFile(path)
 			if !isSpec {
 				continue
 			}
-			found = append(found, filepath.Join(dir, name))
-			targets = append(targets, specFileTarget(path, title, baseURL))
+			target := specFileTarget(path, title, servers)
+			targets = append(targets, target)
+
+			rel := filepath.Join(dir, name)
+			if target.Unsendable != "" {
+				ledger.record(RungSpecFile, "spec file "+rel, target.Unsendable)
+			} else {
+				ledger.record(RungSpecFile, "spec file "+rel, "adopted server "+target.BaseURL)
+			}
 		}
 	}
 
@@ -165,32 +178,58 @@ func discoverSpecFiles(repoRoot string, ledger *Ledger) ([]Target, bool) {
 		ledger.record(RungSpecFile, "looked for openapi/swagger.{json,yaml,yml} under ., api/, docs/, spec/", "none found")
 		return nil, false
 	}
-	ledger.record(RungSpecFile, "spec file(s) on disk: "+strings.Join(found, ", "), "found, no framework probe needed")
 	return targets, true
 }
 
-func specFileTarget(path, title, baseURL string) Target {
+func specFileTarget(path, title string, servers []string) Target {
 	if title == "" {
 		title = filepath.Base(filepath.Dir(path))
 	}
-	return Target{
-		Title:   title,
-		BaseURL: baseURL,
-		SpecURL: path,
-		Env:     buildEnvironment(baseURL),
+	picked, unsendable := pickServer(servers)
+	if unsendable != "" {
+		return Target{Title: title, SpecPath: path, Unsendable: unsendable}
 	}
+	baseURL, env, unsendable := sendability(picked)
+	return Target{Title: title, BaseURL: baseURL, SpecPath: path, Env: env, Unsendable: unsendable}
 }
 
-// parseSpecFile reports whether path is an OpenAPI/Swagger document, with no network call.
-func parseSpecFile(path string) (isSpec bool, title, baseURL string) {
+// pickServer prefers loopback over silently adopting a production server.
+func pickServer(servers []string) (base, unsendable string) {
+	if len(servers) == 0 {
+		return "", "this spec file names no server"
+	}
+	var fallback string
+	for _, raw := range servers {
+		u, err := url.Parse(raw)
+		if err != nil || !u.IsAbs() || u.Host == "" || strings.ContainsAny(raw, "{}") {
+			continue
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			continue
+		}
+		if config.IsLocalHost(u.Hostname()) {
+			return raw, ""
+		}
+		if fallback == "" {
+			fallback = raw
+		}
+	}
+	if fallback != "" {
+		return fallback, ""
+	}
+	return "", "this spec file names no usable server (relative, templated, or missing a host)"
+}
+
+// parseSpecFile reports whether path is an OpenAPI/Swagger document.
+func parseSpecFile(path string) (isSpec bool, title string, servers []string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false, "", ""
+		return false, "", nil
 	}
 
 	var doc struct {
-		OpenAPI string `json:"openapi" yaml:"openapi"`
-		Swagger string `json:"swagger" yaml:"swagger"`
+		OpenAPI any `json:"openapi" yaml:"openapi"`
+		Swagger any `json:"swagger" yaml:"swagger"`
 		Info    struct {
 			Title string `json:"title" yaml:"title"`
 		} `json:"info" yaml:"info"`
@@ -200,16 +239,16 @@ func parseSpecFile(path string) (isSpec bool, title, baseURL string) {
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		if err := yaml.Unmarshal(data, &doc); err != nil {
-			return false, "", ""
+			return false, "", nil
 		}
 	}
-	if doc.OpenAPI == "" && doc.Swagger == "" {
-		return false, "", ""
+	if doc.OpenAPI == nil && doc.Swagger == nil {
+		return false, "", nil
 	}
-	if len(doc.Servers) > 0 {
-		baseURL = doc.Servers[0].URL
+	for _, s := range doc.Servers {
+		servers = append(servers, s.URL)
 	}
-	return true, doc.Info.Title, baseURL
+	return true, doc.Info.Title, servers
 }
 
 // guess is one rung-3 candidate: a base URL and framework-ordered spec paths.
@@ -235,7 +274,7 @@ func buildGuesses(repoRoot string, frameworks []Framework) []guess {
 	return guesses
 }
 
-// orderedProbePaths puts a framework's own paths first, then blip's, each only once.
+// orderedProbePaths puts a framework's paths first, then blip's, each once.
 func orderedProbePaths(first []string) []string {
 	seen := make(map[string]bool, len(first)+len(spec.ProbePaths)+len(spec.ExtraProbePaths))
 	var out []string
@@ -258,14 +297,15 @@ func orderedProbePaths(first []string) []string {
 }
 
 // probeRung is rung 4; a matching listener corrects a guess's stale port.
-func probeRung(ctx context.Context, client *http.Client, repoRoot string, sockets SocketSource, guesses []guess, ledger *Ledger) ([]Target, error) {
+func probeRung(ctx context.Context, client *http.Client, repoRoot string, sockets SocketSource, guesses []guess, ledger *Ledger) []Target {
 	listeners, err := ListenersUnder(sockets, repoRoot)
 	if err != nil {
-		return nil, err
+		ledger.record(RungProbe, "looked for listening ports owned by this repo", "failed: "+err.Error())
+		listeners = nil
 	}
 
 	if len(guesses) == 0 {
-		return probeListeners(ctx, client, listeners, ledger), nil
+		return probeListeners(ctx, client, listeners, ledger)
 	}
 
 	var targets []Target
@@ -281,7 +321,7 @@ func probeRung(ctx context.Context, client *http.Client, repoRoot string, socket
 		}
 		ledger.record(RungProbe, detail, outcomeMessage(outcome, base))
 	}
-	return targets, nil
+	return targets
 }
 
 // listenerFor matches a listener to fw's own directory.
@@ -316,25 +356,34 @@ func probeListeners(ctx context.Context, client *http.Client, listeners []Listen
 		detail := fmt.Sprintf("no framework detected; probed the listening port %d", l.Port)
 		outcome := probeGuess(ctx, client, base, paths)
 		if outcome.found {
-			targets = append(targets, Target{
-				Title:   fmt.Sprintf("port %d", l.Port),
-				BaseURL: base,
-				SpecURL: outcome.specURL,
-				Env:     buildEnvironment(base),
-			})
+			targets = append(targets, listenerTarget(l, outcome.specURL))
 		}
 		ledger.record(RungProbe, detail, outcomeMessage(outcome, base))
 	}
 	return targets
 }
 
-func guessTarget(fw Framework, base, specURL string) Target {
+func listenerTarget(l Listener, specURL string) Target {
+	base := fmt.Sprintf("http://localhost:%d", l.Port)
+	baseURL, env, unsendable := sendability(base)
 	return Target{
-		Title:     titleFor(fw),
-		BaseURL:   base,
-		SpecURL:   specURL,
-		Env:       buildEnvironment(base),
-		Framework: &fw,
+		Title:      fmt.Sprintf("port %d", l.Port),
+		BaseURL:    baseURL,
+		SpecURL:    specURL,
+		Env:        env,
+		Unsendable: unsendable,
+	}
+}
+
+func guessTarget(fw Framework, base, specURL string) Target {
+	baseURL, env, unsendable := sendability(base)
+	return Target{
+		Title:      titleFor(fw),
+		BaseURL:    baseURL,
+		SpecURL:    specURL,
+		Env:        env,
+		Unsendable: unsendable,
+		Framework:  &fw,
 	}
 }
 
@@ -352,20 +401,21 @@ func dirLabel(dir string) string {
 	return dir
 }
 
-func buildEnvironment(base string) *config.Environment {
+// sendability sets BaseURL, Env and Unsendable together, keeping Target's invariant.
+func sendability(base string) (baseURL string, env *config.Environment, unsendable string) {
 	if base == "" {
-		return nil
+		return "", nil, "no base URL is known"
 	}
 	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
-		return nil
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", nil, fmt.Sprintf("%q is not a usable base URL", base)
 	}
-	return &config.Environment{
+	return base, &config.Environment{
 		Name:     "discovered",
 		BaseURL:  u,
 		Insecure: config.IsLocalHost(u.Hostname()),
 		Timeout:  config.DefaultTimeout,
-	}
+	}, ""
 }
 
 // probeOutcome keeps found, reached and tlsRefused separate for a precise ledger.
@@ -402,7 +452,7 @@ func probeGuess(ctx context.Context, client *http.Client, base string, paths []s
 	var out probeOutcome
 	for _, p := range paths {
 		candidate := strings.TrimSuffix(base, "/") + p
-		status, body, err := getCandidate(ctx, client, candidate)
+		status, body, finalURL, err := getCandidate(ctx, client, candidate)
 		if err != nil {
 			if isCertRefusal(err) {
 				out.tlsRefused = true
@@ -411,7 +461,7 @@ func probeGuess(ctx context.Context, client *http.Client, base string, paths []s
 		}
 		out.reached = true
 		if status == http.StatusOK && spec.LooksLikeSpec(body) {
-			out.specURL = candidate
+			out.specURL = finalURL
 			out.found = true
 			return out
 		}
@@ -419,24 +469,30 @@ func probeGuess(ctx context.Context, client *http.Client, base string, paths []s
 	return out
 }
 
-func getCandidate(ctx context.Context, client *http.Client, candidate string) (int, []byte, error) {
+// getCandidate returns the URL that actually answered, not the one requested.
+func getCandidate(ctx context.Context, client *http.Client, candidate string) (status int, body []byte, finalURL string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, candidate, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", err
 	}
 	req.Header.Set("Accept", "application/json, application/yaml;q=0.9, */*;q=0.5")
 
 	resp, err := clientForCandidate(client, candidate).Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", err
 	}
-	return resp.StatusCode, body, nil
+
+	final := candidate
+	if resp.Request != nil && resp.Request.URL != nil {
+		final = resp.Request.URL.String()
+	}
+	return resp.StatusCode, body, final, nil
 }
 
 func isCertRefusal(err error) bool {
@@ -452,19 +508,25 @@ func clientForCandidate(base *http.Client, candidate string) *http.Client {
 	if err != nil || u.Scheme != "https" || !config.IsLocalHost(u.Hostname()) {
 		return base
 	}
-	return insecureVariant(base)
+	if relaxed, ok := insecureVariant(base); ok {
+		return relaxed
+	}
+	return base
 }
 
-func insecureVariant(base *http.Client) *http.Client {
-	clone := *base
-
-	transport, ok := base.Transport.(*http.Transport)
-	if !ok || transport == nil {
-		def, _ := http.DefaultTransport.(*http.Transport)
-		if def == nil {
-			def = &http.Transport{}
-		}
-		transport = def
+// ok is false rather than substituting a transport, so a caller's is never dropped.
+func insecureVariant(base *http.Client) (client *http.Client, ok bool) {
+	var transport *http.Transport
+	switch t := base.Transport.(type) {
+	case *http.Transport:
+		transport = t
+	case nil:
+		transport, _ = http.DefaultTransport.(*http.Transport)
+	default:
+		return nil, false
+	}
+	if transport == nil {
+		return nil, false
 	}
 	transport = transport.Clone()
 
@@ -477,6 +539,8 @@ func insecureVariant(base *http.Client) *http.Client {
 	tlsConfig.InsecureSkipVerify = true
 	transport.TLSClientConfig = tlsConfig
 
+	clone := *base
 	clone.Transport = transport
-	return &clone
+	clone.CheckRedirect = request.CheckRedirect
+	return &clone, true
 }

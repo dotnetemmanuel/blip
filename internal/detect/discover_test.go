@@ -2,6 +2,7 @@ package detect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -84,6 +85,14 @@ func notFoundHandler() http.Handler {
 	return http.NewServeMux() // an empty mux 404s everything
 }
 
+// newSilentTLSServer keeps an expected handshake failure out of the test log.
+func newSilentTLSServer(handler http.Handler) *httptest.Server {
+	srv := httptest.NewUnstartedServer(handler)
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.StartTLS()
+	return srv
+}
+
 // pathRecorder records the order requests arrived in, for asserting probe order.
 type pathRecorder struct {
 	mu    sync.Mutex
@@ -117,6 +126,31 @@ func redirectClient(target string) *http.Client {
 		return (&net.Dialer{}).DialContext(ctx, network, target)
 	}
 	return &http.Client{Transport: transport}
+}
+
+// hostMappingClient lets a fake hostname resolve to a real listener address.
+func hostMappingClient(hostAddr map[string]string) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			if mapped, ok := hostAddr[host]; ok {
+				addr = mapped
+			}
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	return &http.Client{Transport: transport}
+}
+
+// spyTransport is not a *http.Transport, so relaxation must refuse, not substitute.
+type spyTransport struct {
+	inner http.RoundTripper
+	calls int
+}
+
+func (s *spyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.calls++
+	return s.inner.RoundTrip(req)
 }
 
 func TestDiscoverConfigWins(t *testing.T) {
@@ -159,12 +193,20 @@ func TestDiscoverSpecFileNoNetworkCall(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("got %d targets, want 1: %+v", len(targets), targets)
 	}
-	want := filepath.Join(root, "openapi.json")
-	if targets[0].SpecURL != want {
-		t.Errorf("SpecURL = %q, want %q", targets[0].SpecURL, want)
+	got := targets[0]
+	wantPath := filepath.Join(root, "openapi.json")
+	if got.SpecPath != wantPath {
+		t.Errorf("SpecPath = %q, want %q", got.SpecPath, wantPath)
 	}
-	if targets[0].Title != "Test API" {
-		t.Errorf("Title = %q, want %q", targets[0].Title, "Test API")
+	if got.SpecURL != "" {
+		t.Errorf("SpecURL = %q, want empty: rung 2 finds a file, not a URL", got.SpecURL)
+	}
+	if got.Title != "Test API" {
+		t.Errorf("Title = %q, want %q", got.Title, "Test API")
+	}
+	// This fixture's document names no server, so it must be unsendable.
+	if got.BaseURL != "" || got.Env != nil || got.Unsendable == "" {
+		t.Errorf("got BaseURL=%q Env=%v Unsendable=%q, want the no-server unsendable state", got.BaseURL, got.Env, got.Unsendable)
 	}
 	if len(ledger.Attempts) != 2 {
 		t.Errorf("ledger = %+v, want a config miss then a spec-file hit", ledger.Attempts)
@@ -355,10 +397,7 @@ func TestDiscoverCertificateRule(t *testing.T) {
 
 	t.Run("refused off loopback", func(t *testing.T) {
 		dir := t.TempDir()
-		srv := httptest.NewUnstartedServer(openAPIHandler("/openapi/v1.json"))
-		// The expected refusal below logs a server-side TLS alert; silence it.
-		srv.Config.ErrorLog = log.New(io.Discard, "", 0)
-		srv.StartTLS()
+		srv := newSilentTLSServer(openAPIHandler("/openapi/v1.json"))
 		defer srv.Close()
 
 		port := serverPort(t, srv)
@@ -405,12 +444,22 @@ func TestDiscoverTotalFailure(t *testing.T) {
 }
 
 func TestDiscoverNoFalsePositiveOnBundlerOnly(t *testing.T) {
-	targets, _, err := Discover(context.Background(), testdata("frontend"), http.DefaultClient, fakeSource{})
+	// noNetworkClient catches a spurious guess even one that finds no target.
+	targets, ledger, err := Discover(context.Background(), testdata("frontend"), noNetworkClient(t), fakeSource{})
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
 	if len(targets) != 0 {
 		t.Fatalf("got %d targets, want 0 (a plain package.json is not evidence of an API): %+v", len(targets), targets)
+	}
+	found := false
+	for _, a := range ledger.Attempts {
+		if a.Rung == RungFramework && a.Outcome == "none detected" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ledger = %+v, want a framework attempt saying none detected", ledger.Attempts)
 	}
 }
 
@@ -441,5 +490,266 @@ func TestDiscoverMonorepoTwoProjects(t *testing.T) {
 	}
 	if len(targets) != 2 {
 		t.Fatalf("got %d targets, want 2: %+v", len(targets), targets)
+	}
+
+	byTitle := map[string]Target{}
+	for _, tg := range targets {
+		byTitle[tg.Title] = tg
+	}
+	wantOrders := fmt.Sprintf("http://localhost:%d", serverPort(t, orders))
+	wantCatalog := fmt.Sprintf("http://localhost:%d", serverPort(t, catalog))
+	if got := byTitle["orders"].BaseURL; got != wantOrders {
+		t.Errorf("orders BaseURL = %q, want %q (its own server, not catalog's)", got, wantOrders)
+	}
+	if got := byTitle["catalog"].BaseURL; got != wantCatalog {
+		t.Errorf("catalog BaseURL = %q, want %q (its own server, not orders')", got, wantCatalog)
+	}
+}
+
+func TestDiscoverRedirectOffLoopbackIsRefused(t *testing.T) {
+	dir := t.TempDir()
+
+	evil := httptest.NewTLSServer(openAPIHandler("/openapi.json"))
+	defer evil.Close()
+
+	loopback := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://evil.internal/openapi.json", http.StatusFound)
+	}))
+	defer loopback.Close()
+
+	writeAspNetFixture(t, dir, loopback.URL)
+
+	client := hostMappingClient(map[string]string{"evil.internal": evil.Listener.Addr().String()})
+	targets, _, err := Discover(context.Background(), dir, client, fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0: a cross-host redirect off loopback must be refused, not adopted", len(targets))
+	}
+}
+
+func TestDiscoverRedirectSameHostRecordsFinalURL(t *testing.T) {
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openapi/v1.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/v2/openapi.json", http.StatusFound)
+	})
+	mux.HandleFunc("/v2/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openapi":"3.0.0","info":{"title":"Api","version":"1.0"},"paths":{}}`))
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+	writeAspNetFixture(t, dir, srv.URL)
+
+	targets, _, err := Discover(context.Background(), dir, &http.Client{}, fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want 1 (a same-host redirect must still be followed): %+v", len(targets), targets)
+	}
+	want := srv.URL + "/v2/openapi.json"
+	if targets[0].SpecURL != want {
+		t.Errorf("SpecURL = %q, want %q (the URL actually served, not the one first requested)", targets[0].SpecURL, want)
+	}
+}
+
+func TestDiscoverPreservesCallerTransport(t *testing.T) {
+	dir := t.TempDir()
+	srv := newSilentTLSServer(openAPIHandler("/openapi/v1.json"))
+	defer srv.Close()
+	writeAspNetFixture(t, dir, srv.URL)
+
+	spy := &spyTransport{inner: http.DefaultTransport}
+	targets, _, err := Discover(context.Background(), dir, &http.Client{Transport: spy}, fakeSource{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0: an unrecognized transport must not be silently swapped for a lenient one", len(targets))
+	}
+	if spy.calls == 0 {
+		t.Errorf("the caller's transport was never used; it must not be dropped when TLS cannot be relaxed")
+	}
+}
+
+func TestDiscoverFrameworkScanErrorDoesNotAbortProbing(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.Mkdir(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(blocked, 0o755)
+
+	srv := httptest.NewServer(openAPIHandler("/openapi/v1.json"))
+	defer srv.Close()
+
+	canonDir, err := canonical(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockets := fakeSource{listeners: []Listener{{Port: serverPort(t, srv), PID: 1, Cwd: canonDir}}}
+
+	targets, ledger, err := Discover(context.Background(), dir, srv.Client(), sockets)
+	if err != nil {
+		t.Fatalf("Discover: %v, want nil: a rung-3 scan error is a ledger line, not a fatal error", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("got %d targets, want 1: rung 4 must still run after a rung 3 scan error: %+v", len(targets), targets)
+	}
+	found := false
+	for _, a := range ledger.Attempts {
+		if a.Rung == RungFramework && strings.Contains(a.Outcome, "failed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ledger = %+v, want a framework attempt recording the scan failure", ledger.Attempts)
+	}
+}
+
+func TestDiscoverListenerScanErrorDoesNotAbortDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	sockets := fakeSource{err: errors.New("boom")}
+
+	targets, ledger, err := Discover(context.Background(), dir, http.DefaultClient, sockets)
+	if err != nil {
+		t.Fatalf("Discover: %v, want nil: a listener scan error is a ledger line, not a fatal error", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("got %d targets, want 0: %+v", len(targets), targets)
+	}
+	found := false
+	for _, a := range ledger.Attempts {
+		if a.Rung == RungProbe && strings.Contains(a.Outcome, "failed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ledger = %+v, want a probe attempt recording the listener scan failure", ledger.Attempts)
+	}
+}
+
+func TestDiscoverSpecFileSendabilityInvariant(t *testing.T) {
+	write := func(t *testing.T, servers string) string {
+		t.Helper()
+		dir := t.TempDir()
+		doc := fmt.Sprintf(`{"openapi":"3.0.0","info":{"title":"Api","version":"1.0"},"servers":[%s],"paths":{}}`, servers)
+		if err := os.WriteFile(filepath.Join(dir, "openapi.json"), []byte(doc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	assertSendable := func(t *testing.T, got Target) {
+		t.Helper()
+		if got.BaseURL == "" || got.Env == nil || got.Unsendable != "" {
+			t.Errorf("got BaseURL=%q Env=%v Unsendable=%q, want the sendable state", got.BaseURL, got.Env, got.Unsendable)
+		}
+	}
+	assertUnsendable := func(t *testing.T, got Target) {
+		t.Helper()
+		if got.BaseURL != "" || got.Env != nil || got.Unsendable == "" {
+			t.Errorf("got BaseURL=%q Env=%v Unsendable=%q, want the unsendable state", got.BaseURL, got.Env, got.Unsendable)
+		}
+	}
+
+	t.Run("sendable, prefers loopback over a listed production server", func(t *testing.T) {
+		dir := write(t, `{"url":"https://api.acme.com/v1"},{"url":"http://localhost:4000"}`)
+		targets, ledger, err := Discover(context.Background(), dir, noNetworkClient(t), fakeSource{})
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		if len(targets) != 1 {
+			t.Fatalf("got %d targets, want 1: %+v", len(targets), targets)
+		}
+		assertSendable(t, targets[0])
+		if targets[0].BaseURL != "http://localhost:4000" {
+			t.Errorf("BaseURL = %q, want the loopback server, not the production one", targets[0].BaseURL)
+		}
+		found := false
+		for _, a := range ledger.Attempts {
+			if a.Rung == RungSpecFile && a.Outcome == "adopted server http://localhost:4000" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("ledger = %+v, want an attempt naming the adopted server", ledger.Attempts)
+		}
+	})
+
+	t.Run("unsendable, no servers at all", func(t *testing.T) {
+		dir := write(t, ``)
+		targets, _, err := Discover(context.Background(), dir, noNetworkClient(t), fakeSource{})
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		if len(targets) != 1 {
+			t.Fatalf("got %d targets, want 1: %+v", len(targets), targets)
+		}
+		assertUnsendable(t, targets[0])
+	})
+
+	t.Run("unsendable, only relative or templated servers", func(t *testing.T) {
+		dir := write(t, `{"url":"/api/v1"},{"url":"https://{host}/v1"}`)
+		targets, _, err := Discover(context.Background(), dir, noNetworkClient(t), fakeSource{})
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		if len(targets) != 1 {
+			t.Fatalf("got %d targets, want 1: %+v", len(targets), targets)
+		}
+		assertUnsendable(t, targets[0])
+	})
+}
+
+func TestDiscoverBrokenConfigRecordsLedgerBeforeErroring(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".blip.toml"), []byte("not valid toml [[["), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	targets, ledger, err := Discover(context.Background(), dir, noNetworkClient(t), fakeSource{})
+	if err == nil {
+		t.Fatal("Discover: err = nil, want an error for a malformed .blip.toml")
+	}
+	if targets != nil {
+		t.Errorf("targets = %+v, want nil", targets)
+	}
+	if len(ledger.Attempts) == 0 {
+		t.Fatal("ledger has no attempts, want the failed .blip.toml load recorded before erroring")
+	}
+	last := ledger.Attempts[len(ledger.Attempts)-1]
+	if last.Rung != RungConfig || strings.TrimSpace(last.Outcome) == "" {
+		t.Errorf("last attempt = %+v, want a config attempt with a non-empty outcome", last)
+	}
+}
+
+func TestDiscoverConfigWithNoResolvableEnvRecordsLedgerBeforeErroring(t *testing.T) {
+	dir := t.TempDir()
+	body := `name = "twoenvs"
+
+[env.a]
+base_url = "http://localhost:9"
+
+[env.b]
+base_url = "http://localhost:10"
+`
+	if err := os.WriteFile(filepath.Join(dir, ".blip.toml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ledger, err := Discover(context.Background(), dir, noNetworkClient(t), fakeSource{})
+	if err == nil {
+		t.Fatal("Discover: err = nil, want an error: two environments and no default_env is ambiguous")
+	}
+	last := ledger.Attempts[len(ledger.Attempts)-1]
+	if last.Rung != RungConfig || strings.TrimSpace(last.Outcome) == "" {
+		t.Errorf("last attempt = %+v, want a config attempt with a non-empty outcome", last)
 	}
 }

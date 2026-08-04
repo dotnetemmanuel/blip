@@ -33,7 +33,7 @@ var ProbePaths = []string{
 	"/swagger/v1/swagger.yaml",
 }
 
-// ExtraProbePaths are places other stacks publish a spec; blip's own runtime does not probe them.
+// Places other stacks publish a spec; blip does not probe these at runtime.
 var ExtraProbePaths = []string{
 	"/openapi.json",
 	"/swagger.json",

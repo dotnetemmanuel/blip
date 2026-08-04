@@ -54,17 +54,15 @@ func newClient(env *config.Environment, timeout time.Duration, insecure bool) (*
 	if timeout <= 0 {
 		timeout = env.Timeout
 	}
-	return &http.Client{Transport: t, Timeout: timeout, CheckRedirect: checkRedirect}, nil
+	return &http.Client{Transport: t, Timeout: timeout, CheckRedirect: CheckRedirect}, nil
 }
 
 // ErrRedirectRefused marks a redirect blip declined to follow, so it surfaces as
 // a safety refusal rather than as a network failure.
 var ErrRedirectRefused = errors.New("redirect refused")
 
-// checkRedirect refuses to carry credentials somewhere the caller did not ask
-// for. Go only strips Authorization across hostnames, which leaves a custom
-// header credential, a port change and a scheme downgrade all forwarded.
-func checkRedirect(req *http.Request, via []*http.Request) error {
+// CheckRedirect keeps credentials and a relaxed TLS grant off the origin host.
+func CheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= MaxRedirects {
 		return fmt.Errorf("stopped after %d redirects", MaxRedirects)
 	}
