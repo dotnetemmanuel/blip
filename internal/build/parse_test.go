@@ -609,6 +609,169 @@ func TestDotnet10BodyFlatness(t *testing.T) {
 	}
 }
 
+// The .NET 10 fixture really carries a nullable body field (note, [null,string])
+// next to a required non-nullable one (quantity), so required and nullable are
+// exercised as the service actually emits them, not hand-built.
+func TestDotnet10BodyFieldNullability(t *testing.T) {
+	api := load(t, "dotnet10-minimal.json")
+
+	create := find(t, api, "orders", "create")
+	byName := map[string]Field{}
+	for _, f := range create.Body.Fields {
+		byName[f.Name] = f
+	}
+
+	quantity := byName["quantity"]
+	if quantity.Nullable {
+		t.Errorf("quantity.Nullable = true, want false: its union is [integer,string], no null member")
+	}
+	if !quantity.Required {
+		t.Error("quantity.Required = false, want true")
+	}
+
+	note := byName["note"]
+	if !note.Nullable {
+		t.Errorf("note.Nullable = false, want true: its type is [null,string]")
+	}
+	if note.Required {
+		t.Error("note.Required = true, want false: note is not in CreateOrderRequest's required list")
+	}
+	if note.Type != TypeString {
+		t.Errorf("note.Type = %q, want string even though it is nullable", note.Type)
+	}
+}
+
+// A 3.1 nullable parameter must still bind as its real type: the pairing of
+// "nullable" with "integer", not string-by-accident, is the whole point.
+func TestParamNullableFromOpenAPI31TypeUnion(t *testing.T) {
+	spec := `{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{
+		"/api/things":{"get":{"operationId":"listThings","parameters":[
+			{"name":"limit","in":"query","schema":{"type":["null","integer"]}},
+			{"name":"q","in":"query","schema":{"type":"string"}}],
+			"responses":{"200":{"description":"OK"}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Param{}
+	for _, p := range api.Operations[0].ParamsIn(InQuery) {
+		byName[p.Name] = p
+	}
+
+	limit := byName["limit"]
+	if !limit.Nullable {
+		t.Error("limit.Nullable = false, want true for a [null,integer] union")
+	}
+	if limit.Type != TypeInteger {
+		t.Errorf("limit.Type = %q, want integer, not string-by-accident, despite being nullable", limit.Type)
+	}
+
+	q := byName["q"]
+	if q.Nullable {
+		t.Error("q.Nullable = true, want false: q has a plain string schema with no null member")
+	}
+}
+
+// OpenAPI 3.0, which dotnet9-minimal.json is, spells nullability as a separate
+// boolean rather than folding it into the type.
+func TestParamNullableFromOpenAPI30Boolean(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"x","version":"1"},"paths":{
+		"/api/things":{"get":{"operationId":"listThings","parameters":[
+			{"name":"limit","in":"query","schema":{"type":"integer","nullable":true}},
+			{"name":"q","in":"query","schema":{"type":"string"}}],
+			"responses":{"200":{"description":"OK"}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Param{}
+	for _, p := range api.Operations[0].ParamsIn(InQuery) {
+		byName[p.Name] = p
+	}
+
+	limit := byName["limit"]
+	if !limit.Nullable {
+		t.Error("limit.Nullable = false, want true for nullable: true")
+	}
+	if limit.Type != TypeInteger {
+		t.Errorf("limit.Type = %q, want integer", limit.Type)
+	}
+
+	q := byName["q"]
+	if q.Nullable {
+		t.Error("q.Nullable = true, want false: q carries no nullable keyword")
+	}
+}
+
+// Required and nullable are independent: a field can be any of the four
+// combinations, and a real .NET service (BulkOrderRequest-style nesting aside)
+// can emit a field that is both required and nullable at once.
+func TestFieldNullableIsIndependentOfRequired(t *testing.T) {
+	spec := `{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{
+		"/api/widgets":{"post":{"operationId":"createWidget","requestBody":{"required":true,
+			"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateWidget"}}}},
+			"responses":{"200":{"description":"OK"}}}}},
+		"components":{"schemas":{"CreateWidget":{"type":"object","required":["id","tenant"],"properties":{
+			"id":{"type":"string"},
+			"tenant":{"type":["null","string"]},
+			"note":{"type":["null","string"]}
+		}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Field{}
+	for _, f := range api.Operations[0].Body.Fields {
+		byName[f.Name] = f
+	}
+
+	id := byName["id"]
+	if !id.Required || id.Nullable {
+		t.Errorf("id = %+v, want required and not nullable", id)
+	}
+	tenant := byName["tenant"]
+	if !tenant.Required || !tenant.Nullable {
+		t.Errorf("tenant = %+v, want both required and nullable", tenant)
+	}
+	note := byName["note"]
+	if note.Required || !note.Nullable {
+		t.Errorf("note = %+v, want optional and nullable", note)
+	}
+}
+
+// A 3.0 body field spells nullability with the boolean, not the union.
+func TestFieldNullableFromOpenAPI30Boolean(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"x","version":"1"},"paths":{
+		"/api/widgets":{"post":{"operationId":"createWidget","requestBody":{"required":true,
+			"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateWidget"}}}},
+			"responses":{"200":{"description":"OK"}}}}},
+		"components":{"schemas":{"CreateWidget":{"type":"object","required":["tenant"],"properties":{
+			"tenant":{"type":"string","nullable":true},
+			"note":{"type":"string"}
+		}}}}}}`
+
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Field{}
+	for _, f := range api.Operations[0].Body.Fields {
+		byName[f.Name] = f
+	}
+
+	tenant := byName["tenant"]
+	if !tenant.Required || !tenant.Nullable {
+		t.Errorf("tenant = %+v, want both required and nullable", tenant)
+	}
+	note := byName["note"]
+	if note.Nullable {
+		t.Error("note.Nullable = true, want false: note carries no nullable keyword")
+	}
+}
+
 func TestSchemaTypeReadsUnions(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -641,6 +804,31 @@ func TestSchemaTypeWithNoType(t *testing.T) {
 	}
 	if got := schemaType(nil); got != TypeString {
 		t.Errorf("schemaType(nil) = %q, want string", got)
+	}
+}
+
+func TestIsNullableReadsBothSpellings(t *testing.T) {
+	unionTypes := openapi3.Types([]string{"null", "string"})
+	plainTypes := openapi3.Types([]string{"string"})
+
+	tests := []struct {
+		name   string
+		schema *openapi3.Schema
+		want   bool
+	}{
+		{"nil schema", nil, false},
+		{"no type set at all", &openapi3.Schema{}, false},
+		{"plain type, no nullable", &openapi3.Schema{Type: &plainTypes}, false},
+		{"3.1 null union", &openapi3.Schema{Type: &unionTypes}, true},
+		{"3.0 nullable boolean", &openapi3.Schema{Type: &plainTypes, Nullable: true}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNullable(tt.schema); got != tt.want {
+				t.Errorf("isNullable(%+v) = %v, want %v", tt.schema, got, tt.want)
+			}
+		})
 	}
 }
 

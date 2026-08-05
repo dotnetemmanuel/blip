@@ -221,6 +221,7 @@ func params(shared, own openapi3.Parameters) []Param {
 			if p.Schema != nil && p.Schema.Value != nil {
 				s := p.Schema.Value
 				param.Type = schemaType(s)
+				param.Nullable = isNullable(s)
 				param.Enum = enumStrings(s.Enum)
 				if s.Default != nil {
 					param.Default = fmt.Sprint(s.Default)
@@ -306,6 +307,7 @@ func requestBody(ref *openapi3.RequestBodyRef) *Body {
 			Name:        name,
 			Type:        t,
 			Required:    required[name],
+			Nullable:    isNullable(prop.Value),
 			Description: prop.Value.Description,
 			Enum:        enumStrings(prop.Value.Enum),
 		})
@@ -407,6 +409,26 @@ func schemaType(s *openapi3.Schema) string {
 		}
 	}
 	return TypeString
+}
+
+// isNullable reports whether a schema allows null: 3.0 spells that as the
+// separate Nullable boolean, 3.1 folds "null" into the type union.
+func isNullable(s *openapi3.Schema) bool {
+	if s == nil {
+		return false
+	}
+	if s.Nullable {
+		return true
+	}
+	if s.Type == nil {
+		return false
+	}
+	for _, t := range s.Type.Slice() {
+		if t == "null" {
+			return true
+		}
+	}
+	return false
 }
 
 func isObject(s *openapi3.Schema) bool {

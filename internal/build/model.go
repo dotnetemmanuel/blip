@@ -27,6 +27,7 @@ type Param struct {
 	Name        string   `json:"name"`
 	In          string   `json:"in"`
 	Required    bool     `json:"required"`
+	Nullable    bool     `json:"nullable,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Type        string   `json:"type"`
 	ItemType    string   `json:"item_type,omitempty"`
@@ -39,6 +40,7 @@ type Field struct {
 	Name        string   `json:"name"`
 	Type        string   `json:"type"`
 	Required    bool     `json:"required"`
+	Nullable    bool     `json:"nullable,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Enum        []string `json:"enum,omitempty"`
 }

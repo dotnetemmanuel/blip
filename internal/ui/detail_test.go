@@ -149,6 +149,76 @@ func TestRequiredBodyFieldCarriesMarkerAndOptionalFieldDoesNot(t *testing.T) {
 	}
 }
 
+// Required and nullable are orthogonal, and a test that only checks the
+// nullable marker's presence would pass even if the two were conflated. This
+// renders all three real combinations at once and checks what each row does
+// NOT carry as well as what it does.
+func TestRequiredAndNullableRenderIndependently(t *testing.T) {
+	body := &build.Body{Required: true, ContentType: "application/json", Flat: true, Fields: []build.Field{
+		{Name: "sku", Type: build.TypeString, Required: true},
+		{Name: "note", Type: build.TypeString, Nullable: true},
+		{Name: "tenant", Type: build.TypeString, Required: true, Nullable: true},
+	}}
+	op := &build.Operation{Method: "POST", Path: "/x", Body: body}
+	got := detailFor(t, op)
+
+	sku := rowFor(got, "sku")
+	if sku == "" {
+		t.Fatalf("rendered detail has no row for sku:\n%s", got)
+	}
+	if !strings.Contains(sku, "required") {
+		t.Errorf("sku row = %q, want the required marker: sku is required and not nullable", sku)
+	}
+	if strings.Contains(sku, "nullable") {
+		t.Errorf("sku row = %q, want no nullable marker: sku is not nullable", sku)
+	}
+
+	note := rowFor(got, "note")
+	if note == "" {
+		t.Fatalf("rendered detail has no row for note:\n%s", got)
+	}
+	if strings.Contains(note, "required") {
+		t.Errorf("note row = %q, want no required marker: note is optional", note)
+	}
+	if !strings.Contains(note, "nullable") {
+		t.Errorf("note row = %q, want the nullable marker: note is nullable", note)
+	}
+
+	tenant := rowFor(got, "tenant")
+	if tenant == "" {
+		t.Fatalf("rendered detail has no row for tenant:\n%s", got)
+	}
+	if !strings.Contains(tenant, "required") {
+		t.Errorf("tenant row = %q, want the required marker: tenant is required and nullable", tenant)
+	}
+	if !strings.Contains(tenant, "nullable") {
+		t.Errorf("tenant row = %q, want the nullable marker: tenant is required and nullable", tenant)
+	}
+}
+
+// The dotnet10 fixture really carries a nullable body field (note) next to a
+// required non-nullable one (quantity), parsed as the service actually emits it.
+func TestDotnet10NullableBodyFieldRendersDistinctlyFromRequired(t *testing.T) {
+	op := findOp(t, dotnet10Fixture(t), "CreateOrder")
+	got := detailFor(t, op)
+
+	quantity := rowFor(got, "quantity")
+	if quantity == "" {
+		t.Fatalf("rendered detail has no row for quantity:\n%s", got)
+	}
+	if strings.Contains(quantity, "nullable") {
+		t.Errorf("quantity row = %q, want no nullable marker: its union is [integer,string], no null member", quantity)
+	}
+
+	note := rowFor(got, "note")
+	if note == "" {
+		t.Fatalf("rendered detail has no row for note:\n%s", got)
+	}
+	if !strings.Contains(note, "nullable") {
+		t.Errorf("note row = %q, want the nullable marker: note's type is [null,string]", note)
+	}
+}
+
 func TestResponseShapesAreListedIncludingOnesWithNoBody(t *testing.T) {
 	op := findOp(t, dotnet10Fixture(t), "GetOrder")
 	got := detailFor(t, op)

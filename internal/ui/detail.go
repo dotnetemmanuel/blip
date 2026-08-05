@@ -179,18 +179,19 @@ func (m detailModel) renderBodyHeading(body *build.Body, p readPalette) string {
 	return title + "  " + lipgloss.NewStyle().Foreground(p.muted).Render(strings.Join(parts, "  "))
 }
 
-// detailRow is one parameter or field row: name, type, enum values and the required marker.
+// detailRow is one parameter or field row: name, type, enum values, and the required and nullable markers.
 type detailRow struct {
 	name     string
 	typ      string
 	enum     []string
 	required bool
+	nullable bool
 }
 
 func paramRows(params []build.Param) []detailRow {
 	rows := make([]detailRow, len(params))
 	for i, param := range params {
-		rows[i] = detailRow{name: param.Name, typ: arrayLabel(param.Type, param.ItemType), enum: param.Enum, required: param.Required}
+		rows[i] = detailRow{name: param.Name, typ: arrayLabel(param.Type, param.ItemType), enum: param.Enum, required: param.Required, nullable: param.Nullable}
 	}
 	return rows
 }
@@ -198,7 +199,7 @@ func paramRows(params []build.Param) []detailRow {
 func fieldRows(fields []build.Field) []detailRow {
 	rows := make([]detailRow, len(fields))
 	for i, f := range fields {
-		rows[i] = detailRow{name: f.Name, typ: f.Type, enum: f.Enum, required: f.Required}
+		rows[i] = detailRow{name: f.Name, typ: f.Type, enum: f.Enum, required: f.Required, nullable: f.Nullable}
 	}
 	return rows
 }
@@ -230,6 +231,9 @@ func (m detailModel) renderRows(rows []detailRow, p readPalette) string {
 		}
 		if r.required {
 			extras = append(extras, lipgloss.NewStyle().Foreground(p.warn).Render("required"))
+		}
+		if r.nullable {
+			extras = append(extras, lipgloss.NewStyle().Foreground(p.muted).Render("nullable"))
 		}
 		if len(extras) > 0 {
 			line += "  " + strings.Join(extras, "  ")
