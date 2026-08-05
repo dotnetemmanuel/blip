@@ -507,3 +507,86 @@ func TestListWithFewerRowsThanHeightShowsThemAll(t *testing.T) {
 		t.Errorf("visibleWindow() = (%d,%d), want the whole list (0,%d)", start, end, len(m.rows))
 	}
 }
+
+// A row wider than the pane must clip, not wrap: wrapping turns one visible
+// row into two lines, and lipgloss.JoinHorizontal has no notion of rows, so
+// it desynchronizes every line below from whatever sits beside it in the
+// other pane. TestNothingIsDrawnWiderThanTheScreen cannot catch this: a
+// wrapped row still keeps every individual line inside the width, it is only
+// the line *count* that is wrong.
+func TestListRowsClipInsteadOfWrappingAtANarrowWidth(t *testing.T) {
+	m := newListModel(theme.Theme{})
+	m.SetAPI(mustParse(t, sampleSpec))
+	m.SetWidth(20) // narrower than "GET    /api/alpha/{id}"
+
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != len(m.rows) {
+		t.Fatalf("View() emitted %d lines for %d rows at a 20 column width; a row wrapped instead of clipping:\n%s",
+			len(lines), len(m.rows), m.View())
+	}
+	for i, line := range lines {
+		if w := lipgloss.Width(line); w > 20 {
+			t.Errorf("line %d is %d columns wide on a 20 column pane: %q", i, w, line)
+		}
+	}
+}
+
+// Two operations differing only in their final path segment must stay
+// distinguishable once clipped: a plain right-cut would render them
+// identically.
+func TestClippedPathsThatDifferOnlyAtTheEndStayDistinguishable(t *testing.T) {
+	m := newListModel(theme.Theme{})
+	m.SetWidth(18)
+	lines := &build.Operation{Method: "GET", Path: "/api/orders/{id}/lines"}
+	drifted := &build.Operation{Method: "GET", Path: "/api/orders/{id}/drifted"}
+
+	a := stripANSI(m.renderRow(listRow{op: lines}, false))
+	b := stripANSI(m.renderRow(listRow{op: drifted}, false))
+
+	if a == b {
+		t.Fatalf("clipped rows are identical, the distinguishing suffix was lost:\nrow1: %q\nrow2: %q", a, b)
+	}
+	if w := lipgloss.Width(a); w > 18 {
+		t.Errorf("row1 is %d columns wide on an 18 column pane: %q", w, a)
+	}
+	if w := lipgloss.Width(b); w > 18 {
+		t.Errorf("row2 is %d columns wide on an 18 column pane: %q", w, b)
+	}
+}
+
+// A route declared with no group must not read as a bare, unlabeled marker,
+// and describe already answers this exact case with build.TopLevelGroup.
+func TestUnnamedGroupHeaderUsesTheTopLevelLabel(t *testing.T) {
+	m := newListModel(theme.Theme{})
+	m.SetAPI(&build.API{Operations: []*build.Operation{
+		{Group: "", Name: "reindex", Method: "POST", Path: "/admin/reindex", Source: build.SourceRoute},
+	}})
+
+	header := stripANSI(m.renderRow(listRow{group: "", header: true}, false))
+	if !strings.Contains(header, build.TopLevelGroup) {
+		t.Errorf("header = %q, want it to contain %q", header, build.TopLevelGroup)
+	}
+}
+
+// The header for an unnamed group still shows a fold marker, so tab must
+// still answer on it instead of silently doing nothing.
+func TestTabFoldsTheTopLevelGroup(t *testing.T) {
+	m := newListModel(theme.Theme{})
+	m.SetAPI(&build.API{Operations: []*build.Operation{
+		{Group: "", Name: "reindex", Method: "POST", Path: "/admin/reindex", Source: build.SourceRoute},
+	}})
+	idx, ok := m.indexOfHeader("")
+	if !ok {
+		t.Fatal("test setup: no header row for the top-level group")
+	}
+	m.cursor = idx
+
+	before := len(m.rows)
+	m.toggleFold()
+	if !m.folded[""] {
+		t.Fatal("want the top-level group folded after tab, m.folded[\"\"] is still false")
+	}
+	if len(m.rows) != before-1 {
+		t.Errorf("rows = %d after folding, want %d (the header stays, the one operation hides)", len(m.rows), before-1)
+	}
+}

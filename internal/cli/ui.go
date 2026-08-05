@@ -34,6 +34,11 @@ parse and refuses to start unless stdout is a terminal.`
 // listening but may never answer, and the user has no way to skip a stuck one.
 const discoveryTimeout = 5 * time.Second
 
+// loadTimeout bounds a whole spec load, probing included: a host that
+// accepts a connection and never answers must not leave the "loading" screen
+// sitting for as long as every candidate's own per-request timeout adds up to.
+const loadTimeout = 5 * time.Second
+
 func newUICommand(rt *Runtime) *cobra.Command {
 	return &cobra.Command{
 		Use:   "ui",
@@ -87,6 +92,8 @@ func loadAPIFor(rt *Runtime) ui.LoadAPIFunc {
 				"%s has no spec file on disk and no base URL to probe for one; set spec_url or base_url in .blip.toml and try again",
 				target.Title)
 		}
+		ctx, cancel := context.WithTimeout(ctx, loadTimeout)
+		defer cancel()
 		return fetchAPI(ctx, rt, target)
 	}
 }
@@ -116,7 +123,7 @@ func fetchAPI(ctx context.Context, rt *Runtime, target detect.Target) (*build.AP
 		routes = declaredRoutes(cfg)
 	}
 
-	var warnings []string
+	var notes []string
 	fetcher := &spec.Fetcher{
 		Client:            client,
 		Strict:            strict,
@@ -124,7 +131,7 @@ func fetchAPI(ctx context.Context, rt *Runtime, target detect.Target) (*build.AP
 		Offline:           rt.Globals.Offline,
 		SkipNegativeCache: true,
 		Warnf: func(format string, args ...any) {
-			warnings = append(warnings, fmt.Sprintf(format, args...))
+			notes = append(notes, fmt.Sprintf(format, args...))
 		},
 	}
 
@@ -137,6 +144,14 @@ func fetchAPI(ctx context.Context, rt *Runtime, target detect.Target) (*build.AP
 		if err != nil {
 			return nil, err
 		}
+		// Runtime.ReportSpecWarnings only prints a freshly-parsed spec's
+		// advisories (or under --verbose), and stays quiet on a cached or
+		// revalidated one. Browsing must agree, or these read as permanent
+		// nagging about an upstream spec that has not changed since the
+		// plain CLI last saw it and said nothing.
+		if s.Status != spec.StatusFetched && !rt.Globals.Verbose {
+			api.Warnings = nil
+		}
 	case len(routes) > 0:
 		// A repo whose API is entirely hand-declared must not show an empty
 		// screen just because there is no spec to go with the routes.
@@ -148,7 +163,11 @@ func fetchAPI(ctx context.Context, rt *Runtime, target detect.Target) (*build.AP
 	if err := api.AddRoutes(routes); err != nil {
 		return nil, err
 	}
-	api.Warnings = append(api.Warnings, warnings...)
+	// notes (what came from Warnf, such as "using the cache from ...") stay
+	// on their own field rather than joining api.Warnings: they are facts
+	// about this load, not advice about the upstream spec, and the gate above
+	// must not accidentally silence them too.
+	api.LoadNotes = notes
 	api.Stale = s != nil && s.Status == spec.StatusStale
 	return api, nil
 }

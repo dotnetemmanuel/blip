@@ -103,12 +103,15 @@ type Model struct {
 	chosen       detect.Target
 	loadErr      error
 
-	// stale and warnings ride in on a successful loadedMsg: stale marks a
-	// spec served from the cache because the backend could not be reached,
-	// and warnings is whatever the loader's Fetcher.Warnf collected instead
-	// of writing to the real terminal.
-	stale    bool
-	warnings []string
+	// stale, warnings and loadNotes ride in on a successful loadedMsg. stale
+	// marks a spec served from the cache because the backend could not be
+	// reached. warnings are the loaded API's own advisories (already gated by
+	// the loader to the CLI's fresh-fetch rule). loadNotes are facts about
+	// this particular load, such as the cache having been used, collected
+	// from Fetcher.Warnf instead of it writing to the real terminal.
+	stale     bool
+	warnings  []string
+	loadNotes []string
 
 	list   listModel
 	detail detailModel
@@ -202,6 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeBrowsing
 		m.stale = msg.api.Stale
 		m.warnings = msg.api.Warnings
+		m.loadNotes = msg.api.LoadNotes
 		m.list.SetAPI(msg.api)
 		m.applyLayout()
 		m.detail.SetOperation(m.list.Selected())

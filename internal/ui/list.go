@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/theme"
@@ -70,20 +71,44 @@ func (m *listModel) SetHeight(height int) {
 // visibleWindow returns the row range [start, end) that height allows, kept
 // centered on the cursor and clamped to the ends of the list. It is computed
 // fresh at render time from the cursor's current position, so no cursor-moving
-// method needs to separately track a scroll offset.
+// method needs to separately track a scroll offset. m.height <= 0 means no
+// caller ever bounded this pane, so every row shows; a height too small even
+// for the search box (rowBudget) shows none rather than being misread as
+// "unbounded".
 func (m listModel) visibleWindow() (start, end int) {
 	n := len(m.rows)
-	if m.height <= 0 || n <= m.height {
+	if m.height <= 0 {
 		return 0, n
 	}
-	start = m.cursor - m.height/2
+	height := m.rowBudget()
+	if height <= 0 {
+		return 0, 0
+	}
+	if n <= height {
+		return 0, n
+	}
+	start = m.cursor - height/2
 	if start < 0 {
 		start = 0
 	}
-	if start+m.height > n {
-		start = n - m.height
+	if start+height > n {
+		start = n - height
 	}
-	return start, start + m.height
+	return start, start + height
+}
+
+// rowBudget is how many rows visibleWindow may show out of the height
+// SetHeight recorded: the whole pane, minus the two lines the search box adds
+// (a blank separator and the query line) while it is open, so the pane
+// including the search box still fits the height a caller asked for.
+func (m listModel) rowBudget() int {
+	if !m.searching {
+		return m.height
+	}
+	if m.height-2 < 0 {
+		return 0
+	}
+	return m.height - 2
 }
 
 // Selected is the operation the cursor rests on. It is nil when the cursor
@@ -290,12 +315,15 @@ func (m *listModel) hopGroup(delta int) {
 
 // toggleFold folds or unfolds the group the selection is currently in. If
 // folding hides the selected operation, the cursor moves to that group's
-// header, which is the closest thing left to "still selected".
+// header, which is the closest thing left to "still selected". Guarded on the
+// cursor being on a real row rather than on the group being named: a route
+// declared with no group is still a foldable group, "" and all, and its
+// header still shows a fold marker, so tab must still answer it.
 func (m *listModel) toggleFold() {
-	group := m.currentGroup()
-	if group == "" {
+	if m.cursor < 0 || m.cursor >= len(m.rows) {
 		return
 	}
+	group := m.currentGroup()
 	selected := m.Selected()
 	if m.folded == nil {
 		m.folded = map[string]bool{}
@@ -390,18 +418,21 @@ func (m *listModel) indexOfFullName(name string) (int, bool) {
 // View renders the rows height allows, scrolled to keep the cursor visible: a
 // fold marker and name for a header, a method badge and path for an
 // operation. A deprecated operation renders entirely in Muted, badge
-// included, so it never reads as safe to call.
+// included, so it never reads as safe to call. Rows are joined rather than
+// each followed by its own newline, so this block has exactly as many lines
+// as it visibly draws: a trailing newline reads to lipgloss.JoinHorizontal as
+// one more (blank) row than are actually shown, which desynchronizes it from
+// whatever sits beside it.
 func (m listModel) View() string {
-	var b strings.Builder
 	start, end := m.visibleWindow()
+	lines := make([]string, 0, end-start+2)
 	for i := start; i < end; i++ {
-		b.WriteString(m.renderRow(m.rows[i], i == m.cursor))
-		b.WriteString("\n")
+		lines = append(lines, m.renderRow(m.rows[i], i == m.cursor))
 	}
 	if m.searching {
-		b.WriteString("\n/" + m.query)
+		lines = append(lines, "", "/"+m.query)
 	}
-	return b.String()
+	return strings.Join(lines, "\n")
 }
 
 func (m listModel) renderRow(r listRow, selected bool) string {
@@ -414,7 +445,7 @@ func (m listModel) renderRow(r listRow, selected bool) string {
 		if selected {
 			style = style.Background(m.theme.FocusBg)
 		}
-		return style.Render(marker + " " + r.group)
+		return style.Render(clipToWidth(marker+" ", groupLabel(r.group), m.width))
 	}
 
 	op := r.op
@@ -426,13 +457,53 @@ func (m listModel) renderRow(r listRow, selected bool) string {
 	}
 
 	badge := lipgloss.NewStyle().Foreground(badgeColor).Render(padMethod(op.Method))
-	line := badge + " " + op.Path
+	line := clipToWidth(badge+" ", op.Path, m.width)
 
 	style := styled(m.theme, m.width, textColor)
 	if selected {
 		style = style.Background(m.theme.FocusBg)
 	}
 	return style.Render(line)
+}
+
+// groupLabel is what a header row prints for a group name: the name itself,
+// or build.TopLevelGroup for a route declared with none, so the row reads as
+// something rather than a bare fold marker. describe uses the same label for
+// the same case, so the two surfaces agree.
+func groupLabel(group string) string {
+	if group == "" {
+		return build.TopLevelGroup
+	}
+	return group
+}
+
+// clipToWidth keeps prefix (a method badge or a fold marker, already styled
+// and therefore possibly carrying ANSI codes) intact and trims text to fit
+// what is left of width, dropping from its head rather than its tail: two
+// operations that differ only in their final path segment, such as
+// .../orders/{id}/lines and .../orders/{id}/drifted, would otherwise render
+// identically once cut. Below the pane's own Width, lipgloss word-wraps
+// instead of clipping, which is what desynchronizes a join of two panes when
+// one of them wraps to an extra line; this runs before that style is applied,
+// so there is nothing left for it to wrap.
+func clipToWidth(prefix, text string, width int) string {
+	full := prefix + text
+	if width <= 0 {
+		return full
+	}
+	fullW := xansi.StringWidth(full)
+	if fullW <= width {
+		return full
+	}
+	textW := xansi.StringWidth(text)
+	over := fullW - width + 1 // +1 for the ellipsis TruncateLeft prepends
+	if over > textW {
+		return xansi.Truncate(prefix, width, "")
+	}
+	if over <= 0 {
+		return full
+	}
+	return prefix + xansi.TruncateLeft(text, over, "…")
 }
 
 func padMethod(method string) string {

@@ -122,7 +122,7 @@ func (a *API) DescribeLines() []string {
 	for _, group := range a.Groups() {
 		label := group
 		if label == "" {
-			label = "(top level)"
+			label = TopLevelGroup
 		}
 		lines = append(lines, "", label)
 		for _, op := range a.InGroup(group) {

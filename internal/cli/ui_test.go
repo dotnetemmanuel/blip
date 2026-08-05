@@ -249,6 +249,36 @@ func TestLoadAPIReportsAnUnreachableHost(t *testing.T) {
 	}
 }
 
+// A host that accepts the connection and never answers must not leave the
+// "loading" screen sitting for as long as every candidate's own per-request
+// timeout adds up to: the whole load needs its own bound. The environment's
+// own Timeout is set far past that bound, so passing this test only because
+// of request.NewClient's per-request timeout is ruled out.
+func TestLoadAPIBoundsTheWholeLoadEvenWhenTheHostNeverAnswers(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-block
+	}))
+	t.Cleanup(func() {
+		close(block)
+		srv.Close()
+	})
+
+	target := detect.Target{Env: testEnv(t, srv.URL, "")}
+	target.Env.Timeout = 30 * time.Second
+
+	start := time.Now()
+	_, err := loadAPIFor(blankRuntime(t))(context.Background(), target)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want an error: the host never answered")
+	}
+	if elapsed > 7*time.Second {
+		t.Errorf("load took %s, want it bounded near the loader's own timeout regardless of the environment's 30s one", elapsed)
+	}
+}
+
 // writeConfig drops a minimal .blip.toml so rt.Config() resolves for real,
 // the way a rung-1 target's loader call always finds one.
 func writeConfig(t *testing.T, dir, body string) {
@@ -317,13 +347,70 @@ func TestFetchAPIUsesTheCacheWhenTheServiceGoesDown(t *testing.T) {
 		t.Errorf("Warnf wrote to the real terminal while bubbletea owns the screen: %q", stderr.String())
 	}
 	found := false
-	for _, w := range api2.Warnings {
+	for _, w := range api2.LoadNotes {
 		if strings.Contains(w, "cache") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("want a warning about the cache carried back on api.Warnings, got %v", api2.Warnings)
+		t.Errorf("want a note about the cache carried back on api.LoadNotes, got %v", api2.LoadNotes)
+	}
+}
+
+// Runtime.ReportSpecWarnings only prints a spec's parse advisories when it
+// was freshly fetched, or under --verbose, and stays quiet on a cached one.
+// The ui loader must agree, or a cached load nags on every frame about
+// something the plain CLI would say nothing about.
+func TestFetchAPIGatesParseAdvisoriesToTheFreshFetchRule(t *testing.T) {
+	noOpID := `{"openapi":"3.0.1","info":{"title":"Ungated","version":"1"},"paths":{` +
+		`"/x":{"get":{"tags":["G"],"responses":{"200":{"description":"OK"}}}}}}`
+
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/v1.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(noOpID))
+	}))
+	writeConfig(t, dir, fmt.Sprintf("name = \"gate-demo\"\ndefault_env = \"dev\"\n\n[env.dev]\nbase_url = %q\n", srv.URL))
+
+	rt := &Runtime{Globals: &Globals{}, Dir: dir, Stderr: &bytes.Buffer{}}
+	target := configuredTarget(t, rt)
+
+	api, err := loadAPIFor(rt)(context.Background(), target)
+	if err != nil {
+		t.Fatalf("first load (fresh fetch): %v", err)
+	}
+	if len(api.Warnings) == 0 {
+		t.Fatal("want the derived-name advisory on a freshly fetched spec")
+	}
+
+	srv.Close()
+
+	rt2 := &Runtime{Globals: &Globals{}, Dir: dir, Stderr: &bytes.Buffer{}}
+	target2 := configuredTarget(t, rt2)
+	api2, err := loadAPIFor(rt2)(context.Background(), target2)
+	if err != nil {
+		t.Fatalf("second load (from cache): %v", err)
+	}
+	if len(api2.Warnings) != 0 {
+		t.Errorf("want no parse advisories on a cached load, got %v", api2.Warnings)
+	}
+	if len(api2.LoadNotes) == 0 {
+		t.Error("want the cache note still present even though the advisory is gated: they are not the same thing")
+	}
+
+	rt3 := &Runtime{Globals: &Globals{Verbose: true}, Dir: dir, Stderr: &bytes.Buffer{}}
+	target3 := configuredTarget(t, rt3)
+	api3, err := loadAPIFor(rt3)(context.Background(), target3)
+	if err != nil {
+		t.Fatalf("third load (--verbose, from cache): %v", err)
+	}
+	if len(api3.Warnings) == 0 {
+		t.Error("want --verbose to show the advisory even on a cached load")
 	}
 }
 

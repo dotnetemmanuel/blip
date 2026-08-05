@@ -19,9 +19,10 @@ const stateRead paneState = "read"
 
 // detailModel renders everything blip knows about the selected operation.
 type detailModel struct {
-	theme theme.Theme
-	width int
-	state paneState
+	theme  theme.Theme
+	width  int
+	height int
+	state  paneState
 
 	op *build.Operation
 
@@ -51,14 +52,42 @@ func (m *detailModel) SetWidth(width int) {
 	m.refreshDescription()
 }
 
+// SetHeight records how many lines the pane may occupy. There is no
+// scrolling here yet, only a floor: View clamps to it with a marker rather
+// than letting a long operation push everything above it off the top of the
+// terminal.
+func (m *detailModel) SetHeight(height int) {
+	m.height = height
+}
+
 func (m detailModel) View() string {
-	if m.op == nil {
-		return styled(m.theme, m.width, m.theme.Muted).Render("select an operation to see its details")
+	var out string
+	switch {
+	case m.op == nil:
+		out = styled(m.theme, m.width, m.theme.Muted).Render("select an operation to see its details")
+	case m.state != stateRead:
+		out = styled(m.theme, m.width, m.theme.Error).Render(fmt.Sprintf("blip: unhandled pane state %q", m.state))
+	default:
+		out = wrapped(m.theme, m.width).Render(m.viewRead())
 	}
-	if m.state != stateRead {
-		return styled(m.theme, m.width, m.theme.Error).Render(fmt.Sprintf("blip: unhandled pane state %q", m.state))
+	return m.clampHeight(out)
+}
+
+// clampHeight cuts a render down to m.height lines, replacing the last one
+// with a count of what got dropped, rather than letting the pane grow taller
+// than the terminal and push the rest of the screen off the top.
+func (m detailModel) clampHeight(s string) string {
+	if m.height <= 0 {
+		return s
 	}
-	return wrapped(m.theme, m.width).Render(m.viewRead())
+	lines := strings.Split(s, "\n")
+	if len(lines) <= m.height {
+		return s
+	}
+	kept := lines[:max(m.height-1, 0)]
+	hidden := len(lines) - len(kept)
+	marker := styled(m.theme, m.width, m.theme.Muted).Render(fmt.Sprintf("… %d more line(s) below", hidden))
+	return strings.Join(append(kept, marker), "\n")
 }
 
 // readPalette collapses every role to Muted for a deprecated operation, so nothing about it reads as safe.

@@ -144,7 +144,17 @@ type API struct {
 	// because the backend was unreachable, so it may not match what a request
 	// would see right now.
 	Stale bool `json:"-"`
+
+	// LoadNotes are facts about how this document was obtained right now (the
+	// cache was used, the spec moved), as opposed to Warnings, which are
+	// advice about the upstream service that does not change from one load to
+	// the next. Kept separate so a caller can show one and gate the other.
+	LoadNotes []string `json:"-"`
 }
+
+// TopLevelGroup labels an operation or route declared with no group, so a
+// listing has something to print instead of a blank line.
+const TopLevelGroup = "(top level)"
 
 // Groups lists the group names in the order they should appear.
 func (a *API) Groups() []string {

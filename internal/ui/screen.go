@@ -74,29 +74,44 @@ func (m Model) textEntryActive() bool {
 	return m.mode == modeBrowsing && m.list.searching
 }
 
-// chromeLines is how many lines View draws around the panes: the title, a
-// blank line, then (after the panes) another blank line and the footer.
-const chromeLines = 4
-
 // applyLayout splits the screen between the list and the detail pane, and
-// gives the list the height it has left to scroll within. Called once per
-// resize and once when a spec finishes loading, never per frame: detailModel
-// caches its rendered markdown against width, and feeding it a fresh value
-// every View() would defeat that cache.
+// gives both the height they have left once the chrome around them is
+// accounted for. Called once per resize and once when a spec finishes
+// loading, never per frame: detailModel caches its rendered markdown against
+// width, and feeding it a fresh value every View() would defeat that cache.
 func (m *Model) applyLayout() {
 	left, right := splitWidths(m.width)
 	m.list.SetWidth(left)
 	m.detail.SetWidth(right)
-	m.list.SetHeight(contentHeight(m.height))
+	h := m.contentHeight()
+	m.list.SetHeight(h)
+	m.detail.SetHeight(h)
 }
 
-// contentHeight is how many rows the list can show once the chrome around it
-// is accounted for, clamped to zero rather than left negative.
-func contentHeight(height int) int {
-	h := height - chromeLines
+// contentHeight is how many rows the panes can show once the chrome around
+// them is accounted for, clamped to zero rather than left negative.
+func (m Model) contentHeight() int {
+	h := m.height - m.chromeHeight()
 	if h < 0 {
 		return 0
 	}
+	return h
+}
+
+// chromeHeight measures the lines View actually draws outside the panes for
+// the current mode, rather than assuming a fixed count: the title and the
+// blank line under it, any banner, the blank line above the footer, and the
+// footer itself, which can wrap onto more than one line at a narrow width.
+// Deriving it this way means a later task adding more chrome (Tasks 12 and 13
+// both will) costs nothing here.
+func (m Model) chromeHeight() int {
+	const titleAndBlank = 2
+	const blankBeforeFooter = 1
+	h := titleAndBlank + blankBeforeFooter
+	if banner := m.browsingBanner(); banner != "" {
+		h += lipgloss.Height(banner)
+	}
+	h += lipgloss.Height(m.styled(m.theme.Muted).Render(m.footer()))
 	return h
 }
 
@@ -160,11 +175,14 @@ func (m Model) viewBrowsing() string {
 	return panes
 }
 
-// browsingBanner surfaces anything the loader collected instead of writing to
-// the real terminal (Fetcher.Warnf lands here), so a cached spec served while
-// the backend is down does not read as current.
+// browsingBanner surfaces facts about the current load (loadNotes, such as
+// the cache having been used instead of writing to the real terminal) and the
+// loaded API's own advisories (warnings, already gated by the loader to the
+// CLI's fresh-fetch rule so a cached spec does not nag on every frame).
 func (m Model) browsingBanner() string {
-	lines := append([]string(nil), m.warnings...)
+	var lines []string
+	lines = append(lines, m.loadNotes...)
+	lines = append(lines, m.warnings...)
 	if m.stale && len(lines) == 0 {
 		lines = append(lines, "browsing a cached spec; the service could not be reached to refresh it")
 	}

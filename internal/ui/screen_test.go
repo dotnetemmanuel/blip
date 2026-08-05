@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/detect"
@@ -381,7 +382,7 @@ func TestShortWindowKeepsSelectionVisibleWhileBrowsing(t *testing.T) {
 func TestStaleSpecIsFlaggedOnTheModelAndInTheBrowsingView(t *testing.T) {
 	api := mustParse(t, sampleSpec)
 	api.Stale = true
-	api.Warnings = []string{"could not refresh the spec, using the cache from 2020-01-01T00:00:00Z"}
+	api.LoadNotes = []string{"could not refresh the spec, using the cache from 2020-01-01T00:00:00Z"}
 	target := detect.Target{Title: "sample"}
 
 	m := New(context.Background(), Options{
@@ -404,5 +405,81 @@ func TestStaleSpecIsFlaggedOnTheModelAndInTheBrowsingView(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "could not refresh the spec, using the cache from") {
 		t.Errorf("view does not carry the stale warning:\n%s", view)
+	}
+}
+
+// browsingModelSized is browsingModel resized to width x height, list filled
+// with n operations so it has enough rows to actually fill (and, before this
+// fix, overflow) the window.
+func browsingModelSized(t *testing.T, n, width, height int) Model {
+	t.Helper()
+	m := New(context.Background(), Options{})
+	m.list.SetAPI(mustParse(t, manyOpsSpec(n)))
+	m.mode = modeBrowsing
+	m.targets = []detect.Target{{Title: "many"}}
+	m.detail.SetOperation(m.list.Selected())
+	next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	return next.(Model)
+}
+
+// The whole screen, title included, must fit inside the height it was given:
+// listModel.View ending every row with its own trailing newline made
+// lipgloss.JoinHorizontal count one extra (blank) row beyond what was
+// actually visible, so a full list pane rendered one line taller than
+// SetHeight asked for and pushed the title off the top.
+func TestBrowsingScreenFitsExactlyWithinTheGivenHeight(t *testing.T) {
+	const height = 20
+	m := browsingModelSized(t, 30, 80, height)
+
+	if got := lipgloss.Height(m.View()); got > height {
+		t.Errorf("View() is %d lines tall on a %d line screen:\n%s", got, height, m.View())
+	}
+}
+
+// A proxy for what bubbletea itself does: it keeps only the last `height`
+// lines of whatever View() draws. If View() is taller than that, the first
+// line kept will not be the title.
+func TestBrowsingScreenKeepsTheTitleOnScreen(t *testing.T) {
+	const height = 20
+	m := browsingModelSized(t, 30, 80, height)
+
+	lines := strings.Split(m.View(), "\n")
+	visible := lines
+	if len(lines) > height {
+		visible = lines[len(lines)-height:]
+	}
+	if len(visible) == 0 || !strings.Contains(visible[0], "blip") {
+		t.Errorf("the title scrolled off the top of a %d line screen: first kept line is %q", height, visible[0])
+	}
+}
+
+// The banner adds lines above the panes; those lines must be counted too, or
+// a browsing screen that is also stale overflows by the banner's own height.
+func TestBrowsingScreenWithABannerStillFitsTheHeight(t *testing.T) {
+	const height = 20
+	m := browsingModelSized(t, 30, 80, height)
+	m.stale = true
+	m.loadNotes = []string{"could not refresh the spec, using the cache from 2020-01-01T00:00:00Z"}
+	m.applyLayout()
+
+	if got := lipgloss.Height(m.View()); got > height {
+		t.Errorf("View() is %d lines tall on a %d line screen with a banner:\n%s", got, height, m.View())
+	}
+}
+
+// The search box adds two more lines to the list pane while it is open;
+// those must be counted too.
+func TestBrowsingScreenWhileSearchingStillFitsTheHeight(t *testing.T) {
+	const height = 20
+	m := browsingModelSized(t, 30, 80, height)
+
+	next, _ := m.Update(slash)
+	m = next.(Model)
+	if !m.list.searching {
+		t.Fatal("test setup: / did not enter search")
+	}
+
+	if got := lipgloss.Height(m.View()); got > height {
+		t.Errorf("View() is %d lines tall on a %d line screen while searching:\n%s", got, height, m.View())
 	}
 }

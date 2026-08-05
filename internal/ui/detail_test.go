@@ -371,6 +371,48 @@ func TestGoldenDetailAt120Columns(t *testing.T) {
 	golden(t, "detail-120.txt", m.View()+"\n")
 }
 
+// A long operation must not push the rest of the screen off the top: with no
+// scrolling of its own yet, the pane needs at least a floor that stops it
+// growing without bound the way the list did before it got one.
+func TestDetailPaneClampsToItsHeight(t *testing.T) {
+	params := make([]build.Param, 20)
+	for i := range params {
+		params[i] = build.Param{Name: strings.Repeat("p", i+1), In: build.InQuery, Type: build.TypeString}
+	}
+	op := &build.Operation{Method: "GET", Path: "/x", Params: params}
+
+	m := newDetailModel(theme.Theme{})
+	m.SetWidth(80)
+	m.SetOperation(op)
+
+	unclamped := lipgloss.Height(m.View())
+	if unclamped <= 5 {
+		t.Fatalf("test setup: operation only rendered %d lines, want more than the height about to be set", unclamped)
+	}
+
+	m.SetHeight(5)
+	got := lipgloss.Height(m.View())
+	if got > 5 {
+		t.Errorf("View() is %d lines tall after SetHeight(5):\n%s", got, m.View())
+	}
+	if !strings.Contains(m.View(), "more line") {
+		t.Errorf("clamped view does not say anything was cut:\n%s", m.View())
+	}
+}
+
+// A height of zero (the default before any WindowSizeMsg) must not clamp at
+// all: SetHeight is never called by tests that construct a detailModel
+// directly, and existing goldens assume nothing is cut.
+func TestDetailPaneWithNoHeightSetIsNotClamped(t *testing.T) {
+	m := newDetailModel(theme.Theme{})
+	m.SetWidth(80)
+	m.SetOperation(widgetOp(t))
+
+	if lipgloss.Height(m.View()) < 5 {
+		t.Fatal("test setup: widgetOp did not render enough lines to be a meaningful check")
+	}
+}
+
 // builtinDetailTheme is a fixed palette so the goldens do not move if a real theme is retuned.
 func builtinDetailTheme() theme.Theme {
 	return theme.Theme{
