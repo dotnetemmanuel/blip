@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -12,6 +13,18 @@ import (
 	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/theme"
 )
+
+var ansiCodes = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripANSI(s string) string { return ansiCodes.ReplaceAllString(s, "") }
+
+func trimTrailingSpacePerLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " ")
+	}
+	return strings.Join(lines, "\n")
+}
 
 var update = flag.Bool("update", false, "rewrite the golden files")
 
@@ -224,6 +237,88 @@ func TestNilOperationDoesNotPanicAndSaysSoInWords(t *testing.T) {
 	got := m.View()
 	if strings.TrimSpace(got) == "" {
 		t.Fatal("View() with no operation set is blank; want it to say something")
+	}
+}
+
+func TestUnhandledPaneStateAnnouncesItselfRatherThanBlank(t *testing.T) {
+	m := detailModel{theme: theme.Theme{}, op: &build.Operation{Method: "GET", Path: "/x"}, state: paneState("bogus")}
+	got := m.View()
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("an unhandled pane state renders blank, want it to say something")
+	}
+	if !strings.Contains(got, "bogus") {
+		t.Errorf("got = %q, want it to name the unhandled state", got)
+	}
+}
+
+func longDescriptionOp() *build.Operation {
+	return &build.Operation{Method: "GET", Path: "/x", Description: "A description with enough words in it that glamour actually has something to lay out and cache across renders."}
+}
+
+// View must never rebuild the renderer: bubbletea redraws after every message, so a rebuild here pays for a fresh goldmark parser and chroma highlighter on every keypress.
+func TestMarkdownRendererIsNotRebuiltOnEveryView(t *testing.T) {
+	m := newDetailModel(theme.Theme{})
+	m.SetWidth(80)
+	m.SetOperation(longDescriptionOp())
+
+	built := m.mdRenderer
+	if built == nil {
+		t.Fatal("mdRenderer is nil after SetOperation with a non-empty description")
+	}
+	m.View()
+	m.View()
+	m.View()
+	if m.mdRenderer != built {
+		t.Fatal("View() rebuilt the markdown renderer; it must only rebuild on SetWidth or SetOperation")
+	}
+}
+
+func TestMarkdownRendererIsReusedAcrossOperationsAtTheSameWidth(t *testing.T) {
+	m := newDetailModel(theme.Theme{})
+	m.SetWidth(80)
+	m.SetOperation(&build.Operation{Method: "GET", Path: "/a", Description: "First description, long enough to matter for wrapping."})
+	built := m.mdRenderer
+
+	m.SetOperation(&build.Operation{Method: "GET", Path: "/b", Description: "Second description, also long enough to matter."})
+	if m.mdRenderer != built {
+		t.Fatal("SetOperation rebuilt the renderer even though the width and deprecated state did not change")
+	}
+}
+
+func TestMarkdownRendererRebuildsWhenWidthChanges(t *testing.T) {
+	m := newDetailModel(theme.Theme{})
+	m.SetOperation(longDescriptionOp())
+	m.SetWidth(80)
+	built := m.mdRenderer
+
+	m.SetWidth(120)
+	if m.mdRenderer == built {
+		t.Fatal("SetWidth did not rebuild the renderer, so the description would keep wrapping at the old width")
+	}
+}
+
+func TestMarkdownListsAndHeadingsRenderStructurally(t *testing.T) {
+	op := &build.Operation{
+		Method:      "GET",
+		Path:        "/x",
+		Description: "## Notes\n\nRetry rules:\n\n- First retry\n- Second retry\n\n1. Step one\n2. Step two\n",
+	}
+	got := trimTrailingSpacePerLine(stripANSI(detailFor(t, op)))
+
+	if !strings.Contains(got, "• First retry") || !strings.Contains(got, "• Second retry") {
+		t.Errorf("rendered detail is missing bulleted list markers:\n%s", got)
+	}
+	if !strings.Contains(got, "1. Step one") || !strings.Contains(got, "2. Step two") {
+		t.Errorf("rendered detail is missing numbered list markers:\n%s", got)
+	}
+	if strings.Contains(got, "1Step one") {
+		t.Errorf("numbered list ran together with no separator:\n%s", got)
+	}
+	if !strings.Contains(got, "## Notes") {
+		t.Errorf("rendered detail dropped the heading marker:\n%s", got)
+	}
+	if !strings.Contains(got, "## Notes\n\nRetry rules") {
+		t.Errorf("heading is not separated from the paragraph that follows it:\n%s", got)
 	}
 }
 

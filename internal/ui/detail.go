@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -23,6 +24,12 @@ type detailModel struct {
 	state paneState
 
 	op *build.Operation
+
+	mdRenderer *glamour.TermRenderer
+	mdWidth    int
+	mdMuted    bool
+
+	descRendered string
 }
 
 func newDetailModel(t theme.Theme) detailModel {
@@ -32,11 +39,16 @@ func newDetailModel(t theme.Theme) detailModel {
 // SetOperation loads the operation to describe; a nil operation clears the pane instead of panicking.
 func (m *detailModel) SetOperation(op *build.Operation) {
 	m.op = op
+	m.refreshDescription()
 }
 
 // SetWidth records the pane width, which is also the column the description wraps to.
 func (m *detailModel) SetWidth(width int) {
+	if width == m.width {
+		return
+	}
 	m.width = width
+	m.refreshDescription()
 }
 
 func (m detailModel) View() string {
@@ -44,9 +56,9 @@ func (m detailModel) View() string {
 		return styled(m.theme, m.width, m.theme.Muted).Render("select an operation to see its details")
 	}
 	if m.state != stateRead {
-		return ""
+		return styled(m.theme, m.width, m.theme.Error).Render(fmt.Sprintf("blip: unhandled pane state %q", m.state))
 	}
-	return m.viewRead()
+	return wrapped(m.theme, m.width).Render(m.viewRead())
 }
 
 // readPalette collapses every role to Muted for a deprecated operation, so nothing about it reads as safe.
@@ -77,9 +89,9 @@ func (m detailModel) viewRead() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader(op, p))
 
-	if desc := strings.TrimSpace(op.Description); desc != "" {
+	if m.descRendered != "" {
 		b.WriteString("\n\n")
-		b.WriteString(m.renderMarkdown(desc, p))
+		b.WriteString(m.descRendered)
 	}
 
 	for _, in := range []string{build.InPath, build.InQuery, build.InHeader} {
@@ -244,39 +256,77 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-len(s))
 }
 
-// renderMarkdown is the only place this package parses markdown syntax.
-func (m detailModel) renderMarkdown(desc string, p readPalette) string {
+// refreshDescription recomputes descRendered, the only place this package parses markdown syntax.
+func (m *detailModel) refreshDescription() {
+	if m.op == nil {
+		m.descRendered = ""
+		return
+	}
+	desc := strings.TrimSpace(m.op.Description)
+	if desc == "" {
+		m.descRendered = ""
+		return
+	}
+
+	m.ensureRenderer()
+	if m.mdRenderer == nil {
+		m.descRendered = desc
+		return
+	}
+	out, err := m.mdRenderer.Render(desc)
+	if err != nil {
+		m.descRendered = desc
+		return
+	}
+	m.descRendered = strings.TrimRight(out, "\n")
+}
+
+// ensureRenderer rebuilds the glamour renderer only when the width or the muted palette changed.
+func (m *detailModel) ensureRenderer() {
 	width := m.width
 	if width <= 0 {
 		width = 80
 	}
+	muted := m.op != nil && m.op.Deprecated
+	if m.mdRenderer != nil && m.mdWidth == width && m.mdMuted == muted {
+		return
+	}
 
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStyles(markdownStyle(p)),
+		glamour.WithStyles(markdownStyle(m.palette())),
 		glamour.WithWordWrap(width),
 		glamour.WithColorProfile(lipgloss.ColorProfile()),
 	)
 	if err != nil {
-		return desc
+		m.mdRenderer = nil
+		return
 	}
-	out, err := r.Render(desc)
-	if err != nil {
-		return desc
-	}
-	return strings.TrimRight(out, "\n")
+	m.mdRenderer = r
+	m.mdWidth = width
+	m.mdMuted = muted
 }
 
 func markdownStyle(p readPalette) ansi.StyleConfig {
 	str := func(c lipgloss.Color) *string { s := string(c); return &s }
 	yes := func() *bool { b := true; return &b }
+	prefixed := func(s string) ansi.StyleBlock { return ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Prefix: s}} }
 
 	return ansi.StyleConfig{
-		Document:  ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: str(p.text)}},
-		Paragraph: ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: str(p.text)}},
-		Strong:    ansi.StylePrimitive{Bold: yes(), Color: str(p.heading)},
-		Emph:      ansi.StylePrimitive{Italic: yes(), Color: str(p.text)},
-		Code:      ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: str(p.accent), BackgroundColor: str(p.codeBg)}},
-		Item:      ansi.StylePrimitive{Color: str(p.text)},
-		Link:      ansi.StylePrimitive{Color: str(p.accent), Underline: yes()},
+		Document:    ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: str(p.text)}},
+		Paragraph:   ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: str(p.text)}},
+		Strong:      ansi.StylePrimitive{Bold: yes(), Color: str(p.heading)},
+		Emph:        ansi.StylePrimitive{Italic: yes(), Color: str(p.text)},
+		Code:        ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: str(p.accent), BackgroundColor: str(p.codeBg)}},
+		Link:        ansi.StylePrimitive{Color: str(p.accent), Underline: yes()},
+		Heading:     ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{Color: str(p.heading), Bold: yes(), BlockSuffix: "\n"}},
+		H1:          prefixed("# "),
+		H2:          prefixed("## "),
+		H3:          prefixed("### "),
+		H4:          prefixed("#### "),
+		H5:          prefixed("##### "),
+		H6:          prefixed("###### "),
+		List:        ansi.StyleList{LevelIndent: 2},
+		Item:        ansi.StylePrimitive{BlockPrefix: "• ", Color: str(p.text)},
+		Enumeration: ansi.StylePrimitive{BlockPrefix: ". ", Color: str(p.text)},
 	}
 }
