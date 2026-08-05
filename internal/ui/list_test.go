@@ -55,9 +55,21 @@ var (
 	esc    = tea.KeyMsg{Type: tea.KeyEsc}
 	tab    = tea.KeyMsg{Type: tea.KeyTab}
 	back   = tea.KeyMsg{Type: tea.KeyBackspace}
+	space  = tea.KeyMsg{Type: tea.KeySpace}
 	nKey   = rune1('n')
 	shiftN = rune1('N')
 )
+
+// forceTrueColor makes a rendered fragment carry real ANSI colour codes even
+// though go test runs without a terminal, then puts the profile back so a
+// test file that sorts after this one is never run under a forced profile it
+// never asked for.
+func forceTrueColor(t *testing.T) {
+	t.Helper()
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+}
 
 func TestSetAPISelectsTheFirstOperation(t *testing.T) {
 	m := sampleList(t)
@@ -186,14 +198,32 @@ func TestFoldingHidesItsRowsAndKeepsTheSelectionValid(t *testing.T) {
 	}
 }
 
-// A folded group's operations must not survive a search either: rebuild has
-// exactly one place that decides visibility.
+// A search overrides a fold, not the other way around: it exists to help you
+// find a row you cannot currently see, so it must be able to reveal one.
 func TestUnfoldingRestoresTheRows(t *testing.T) {
 	m := sampleList(t)
 	folded := send(m, tab)
 	unfolded := send(folded, tab)
 	if got := opFullNames(unfolded); len(got) != 4 {
 		t.Fatalf("rows after unfolding = %v, want all four back", got)
+	}
+}
+
+func TestSearchOverridesAFoldedGroupAndEscRestoresTheFold(t *testing.T) {
+	m := sampleList(t)
+	folded := send(m, tab) // selection starts on listAlpha, so tab folds alpha
+	if got := opFullNames(folded); contains(got, "listAlpha") {
+		t.Fatalf("fixture sanity: rows = %v, want alpha already folded away", got)
+	}
+
+	filtered := send(folded, slash, runes("alpha"))
+	if got := opFullNames(filtered); len(got) != 2 || !contains(got, "listAlpha") || !contains(got, "getAlpha") {
+		t.Fatalf("search while alpha is folded = %v, want alpha's rows back: search overrides fold", got)
+	}
+
+	restored := send(filtered, esc)
+	if got := opFullNames(restored); contains(got, "listAlpha") {
+		t.Fatalf("rows after esc = %v, want alpha still folded: esc restores the query, not the fold state", got)
 	}
 }
 
@@ -286,8 +316,41 @@ func TestBackspaceDuringSearchNarrowsTheQuery(t *testing.T) {
 	}
 }
 
+// A phrase containing a space is what a search for a summary actually looks
+// like. bubbletea reports a lone space as tea.KeySpace, not as KeyRunes, so a
+// query built only from the KeyRunes case silently drops every space typed.
+func TestSpaceDuringSearchJoinsTheQueryInsteadOfBeingDropped(t *testing.T) {
+	m := sampleList(t)
+	typed := send(m, slash, runes("fetch"), space, runes("one"))
+	if got := opFullNames(typed); len(got) != 2 || !contains(got, "getAlpha") || !contains(got, "getBeta") {
+		t.Fatalf(`query %q rows = %v, want getAlpha and getBeta: a typed space must join the query, not vanish`, typed.query, got)
+	}
+}
+
+// n, N and a fold all move the cursor onto a header row, and that has to be
+// visible or the headline feature of this list (browsing by group) draws
+// nothing when used.
+func TestGroupHeaderRendersDifferentlyWhenSelected(t *testing.T) {
+	forceTrueColor(t)
+
+	th := theme.Theme{Focus: "#123456", FocusBg: "#abcdef"}
+	m := listModel{theme: th}
+	row := listRow{header: true, group: "alpha"}
+
+	unselected := m.renderRow(row, false)
+	selectedRow := m.renderRow(row, true)
+	if unselected == selectedRow {
+		t.Fatalf("a header renders identically whether or not the cursor is on it: %q", unselected)
+	}
+
+	want := styled(th, 0, th.Focus).Background(th.FocusBg).Render("- alpha")
+	if selectedRow != want {
+		t.Fatalf("selected header = %q, want %q", selectedRow, want)
+	}
+}
+
 func TestMethodBadgeUsesTheSemanticRole(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	forceTrueColor(t)
 
 	th := theme.Theme{Info: "#111111", Success: "#222222", Warning: "#333333", Danger: "#444444", Text: "#555555"}
 	m := listModel{theme: th}
@@ -313,7 +376,7 @@ func TestMethodBadgeUsesTheSemanticRole(t *testing.T) {
 }
 
 func TestDeprecatedOperationRendersMutedThroughout(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	forceTrueColor(t)
 
 	th := theme.Theme{Info: "#111111", Muted: "#999999", Text: "#555555"}
 	m := listModel{theme: th}
@@ -329,6 +392,20 @@ func TestDeprecatedOperationRendersMutedThroughout(t *testing.T) {
 	infoBadge := lipgloss.NewStyle().Foreground(th.Info).Render(padMethod("GET"))
 	if strings.Contains(got, infoBadge) {
 		t.Errorf("deprecated GET badge = %q, still carries Info; a deprecated row must never look safe", got)
+	}
+}
+
+// A listModel built as a bare struct literal (rather than through
+// newListModel or SetAPI) has a nil folded map. Task 11 embedding this model
+// on the root Model has no reason to know that only two of its constructors
+// are safe to use, so toggleFold must tolerate the nil map itself.
+func TestToggleFoldOnANilFoldedMapDoesNotPanic(t *testing.T) {
+	m := listModel{rows: []listRow{{group: "alpha", op: &build.Operation{ID: "x"}}}}
+
+	m.toggleFold()
+
+	if !m.folded["alpha"] {
+		t.Fatalf("folded[%q] = %v, want true after the first toggle", "alpha", m.folded["alpha"])
 	}
 }
 

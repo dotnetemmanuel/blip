@@ -88,6 +88,8 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 			}
 		case tea.KeyRunes:
 			m.setQuery(m.query + string(key.Runes))
+		case tea.KeySpace:
+			m.setQuery(m.query + " ")
 		case tea.KeyUp:
 			m.moveUp()
 		case tea.KeyDown:
@@ -268,6 +270,9 @@ func (m *listModel) toggleFold() {
 		return
 	}
 	selected := m.Selected()
+	if m.folded == nil {
+		m.folded = map[string]bool{}
+	}
 	m.folded[group] = !m.folded[group]
 	m.rebuild()
 
@@ -376,7 +381,11 @@ func (m listModel) renderRow(r listRow, selected bool) string {
 		if m.folded[r.group] {
 			marker = "+"
 		}
-		return styled(m.theme, m.width, m.theme.Focus).Render(marker + " " + r.group)
+		style := styled(m.theme, m.width, m.theme.Focus)
+		if selected {
+			style = style.Background(m.theme.FocusBg)
+		}
+		return style.Render(marker + " " + r.group)
 	}
 
 	op := r.op
