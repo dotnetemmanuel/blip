@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/detect"
 	"github.com/dotnetemmanuel/blip/internal/output"
 	"github.com/dotnetemmanuel/blip/internal/theme"
@@ -21,6 +22,12 @@ import (
 // DiscoverFunc answers "what API lives in this repo". The command layer binds it
 // to detect.Discover so this package needs no config, client or socket source.
 type DiscoverFunc func(context.Context) ([]detect.Target, detect.Ledger, error)
+
+// LoadAPIFunc parses the operations of one discovered target. It takes a target
+// and nothing else, so browsing cannot reach a vault even by mistake: the command
+// layer binds it to read SpecPath from disk or fetch SpecURL, whichever the
+// discovery rung set, with no credential source in reach.
+type LoadAPIFunc func(context.Context, detect.Target) (*build.API, error)
 
 // Options is everything Run needs from the command layer.
 type Options struct {
@@ -33,6 +40,7 @@ type Options struct {
 	StdoutIsTTY bool
 	Theme       theme.Theme
 	Discover    DiscoverFunc
+	LoadAPI     LoadAPIFunc
 }
 
 // Run starts the explorer. It refuses rather than negotiating when stdout is not
@@ -80,6 +88,7 @@ type Model struct {
 	ctx      context.Context
 	theme    theme.Theme
 	discover DiscoverFunc
+	loadAPI  LoadAPIFunc
 
 	width  int
 	height int
@@ -88,6 +97,14 @@ type Model struct {
 	targets     []detect.Target
 	ledger      detect.Ledger
 	err         error
+
+	mode         uiMode
+	choiceCursor int
+	chosen       detect.Target
+	loadErr      error
+
+	list   listModel
+	detail detailModel
 }
 
 var _ tea.Model = Model{}
@@ -102,7 +119,10 @@ func New(ctx context.Context, opts Options) Model {
 		ctx:         ctx,
 		theme:       opts.Theme,
 		discover:    opts.Discover,
+		loadAPI:     opts.LoadAPI,
 		discovering: opts.Discover != nil,
+		list:        newListModel(opts.Theme),
+		detail:      newDetailModel(opts.Theme),
 	}
 }
 
@@ -110,6 +130,12 @@ type discoveredMsg struct {
 	targets []detect.Target
 	ledger  detect.Ledger
 	err     error
+}
+
+// loadedMsg is what a target's spec load resolves to, success or failure.
+type loadedMsg struct {
+	api *build.API
+	err error
 }
 
 func (m Model) Init() tea.Cmd {
@@ -127,14 +153,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.applyWidths()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		}
+		switch m.mode {
+		case modeChoosing:
+			return m, m.updateChoosing(msg)
+		case modeBrowsing:
+			return m, m.updateBrowsing(msg)
+		}
 	case discoveredMsg:
 		m.discovering = false
 		m.targets, m.ledger, m.err = msg.targets, msg.ledger, msg.err
+		if msg.err == nil && m.loadAPI != nil {
+			if len(msg.targets) == 1 {
+				m.mode = modeLoading
+				m.chosen = msg.targets[0]
+				return m, m.loadCmd()
+			}
+			if len(msg.targets) > 1 {
+				m.mode = modeChoosing
+				m.choiceCursor = 0
+			}
+		}
+	case loadedMsg:
+		if msg.err != nil {
+			m.mode = modeFailed
+			m.loadErr = msg.err
+			return m, nil
+		}
+		m.mode = modeBrowsing
+		m.list.SetAPI(msg.api)
+		m.applyWidths()
+		m.detail.SetOperation(m.list.Selected())
 	}
 	return m, nil
 }
@@ -153,6 +207,15 @@ func (m Model) View() string {
 	case len(m.targets) == 0:
 		b.WriteString("no API found")
 		b.WriteString(m.ledgerLines())
+	case m.mode == modeChoosing:
+		b.WriteString(m.viewChoosing())
+	case m.mode == modeLoading:
+		b.WriteString(m.wrapped().Render("loading the spec for " + m.chosen.Title))
+	case m.mode == modeFailed:
+		b.WriteString(m.styled(m.theme.Error).Render(m.loadErr.Error()))
+		b.WriteString(m.ledgerLines())
+	case m.mode == modeBrowsing:
+		b.WriteString(m.viewBrowsing())
 	default:
 		for _, t := range m.targets {
 			b.WriteString(m.wrapped().Render(fmt.Sprintf("%s  %s", t.Title, m.reachability(t))) + "\n")
@@ -160,7 +223,7 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Muted).Render("q quit"))
+	b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Muted).Render(m.footer()))
 	return b.String()
 }
 

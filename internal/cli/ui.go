@@ -2,17 +2,22 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/config"
 	"github.com/dotnetemmanuel/blip/internal/detect"
 	"github.com/dotnetemmanuel/blip/internal/output"
+	"github.com/dotnetemmanuel/blip/internal/request"
 	"github.com/dotnetemmanuel/blip/internal/theme"
 	"github.com/dotnetemmanuel/blip/internal/ui"
 )
@@ -47,6 +52,7 @@ func newUICommand(rt *Runtime) *cobra.Command {
 				StdoutIsTTY: rt.StdoutIsTTY,
 				Theme:       defaultTheme(),
 				Discover:    discoverIn(root),
+				LoadAPI:     loadAPI,
 			})
 		},
 	}
@@ -59,6 +65,70 @@ func (rt *Runtime) uiInput() io.Reader {
 		return nil
 	}
 	return rt.Stdin
+}
+
+// loadTimeout bounds a single spec fetch, same order of magnitude as discovery.
+const loadTimeout = 5 * time.Second
+
+// loadAPI is ui.Options.LoadAPI: it turns a discovered target into a parsed
+// API. It takes a target and nothing else, so it has no credential source to
+// reach for even by mistake; an authenticated spec therefore fails to load
+// here, and that failure is reported on screen rather than worked around.
+func loadAPI(ctx context.Context, target detect.Target) (*build.API, error) {
+	if target.SpecPath != "" {
+		data, err := os.ReadFile(target.SpecPath)
+		if err != nil {
+			return nil, output.WithCode(fmt.Errorf("reading %s: %w", target.SpecPath, err), output.ExitTransport)
+		}
+		return build.Parse(data)
+	}
+	if target.SpecURL == "" {
+		return nil, output.Configf("%s has no known spec location to browse", target.Title)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, loadTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.SpecURL, nil)
+	if err != nil {
+		return nil, output.WithCode(fmt.Errorf("building a request for %s: %w", target.SpecURL, err), output.ExitInternal)
+	}
+	req.Header.Set("Accept", "application/json, application/yaml;q=0.9, */*;q=0.5")
+
+	resp, err := unauthenticatedSpecClient(target.SpecURL).Do(req)
+	if err != nil {
+		return nil, output.WithCode(fmt.Errorf("fetching %s: %w", target.SpecURL, err), output.ExitTransport)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, output.WithCode(fmt.Errorf("reading the response from %s: %w", target.SpecURL, err), output.ExitTransport)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, output.WithCode(fmt.Errorf("%s returned %d", target.SpecURL, resp.StatusCode), output.ExitTransport)
+	}
+	return build.Parse(body)
+}
+
+// unauthenticatedSpecClient relaxes TLS only for a spec URL whose own host is
+// loopback, and always applies the redirect policy so that relaxation cannot
+// be carried to somewhere else by a redirect.
+func unauthenticatedSpecClient(specURL string) *http.Client {
+	client := &http.Client{Timeout: loadTimeout, CheckRedirect: request.CheckRedirect}
+
+	u, err := url.Parse(specURL)
+	if err != nil || u.Scheme != "https" || !config.IsLocalHost(u.Hostname()) {
+		return client
+	}
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return client
+	}
+	t := transport.Clone()
+	t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	client.Transport = t
+	return client
 }
 
 func discoverIn(root string) ui.DiscoverFunc {

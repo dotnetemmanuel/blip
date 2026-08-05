@@ -2,11 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dotnetemmanuel/blip/internal/detect"
 	"github.com/dotnetemmanuel/blip/internal/output"
 )
 
@@ -96,5 +100,100 @@ func TestTheDefaultThemeHasColors(t *testing.T) {
 
 	if th.Primary == "" || th.Text == "" || th.Muted == "" {
 		t.Fatalf("the ui would render with no color at all: %+v", th)
+	}
+}
+
+func TestLoadAPIReadsSpecPathFromDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openapi.json")
+	if err := os.WriteFile(path, []byte(`{"openapi":"3.0.1","info":{"title":"OnDisk","version":"1"},"paths":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	api, err := loadAPI(context.Background(), detect.Target{SpecPath: path})
+	if err != nil {
+		t.Fatalf("loadAPI: %v", err)
+	}
+	if api.Title != "OnDisk" {
+		t.Errorf("api.Title = %q, want %q", api.Title, "OnDisk")
+	}
+}
+
+func TestLoadAPIPrefersSpecPathOverSpecURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openapi.json")
+	if err := os.WriteFile(path, []byte(`{"openapi":"3.0.1","info":{"title":"FromDisk","version":"1"},"paths":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	t.Cleanup(srv.Close)
+
+	api, err := loadAPI(context.Background(), detect.Target{SpecPath: path, SpecURL: srv.URL + "/openapi.json"})
+	if err != nil {
+		t.Fatalf("loadAPI: %v", err)
+	}
+	if api.Title != "FromDisk" {
+		t.Errorf("api.Title = %q, want the document on disk, not the network", api.Title)
+	}
+	if called {
+		t.Error("loadAPI fetched SpecURL even though SpecPath was set; rung 2 must never touch the network")
+	}
+}
+
+func TestLoadAPIFetchesSpecURLWhenThereIsNoSpecPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openapi":"3.0.1","info":{"title":"FromNetwork","version":"1"},"paths":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	api, err := loadAPI(context.Background(), detect.Target{SpecURL: srv.URL + "/openapi.json"})
+	if err != nil {
+		t.Fatalf("loadAPI: %v", err)
+	}
+	if api.Title != "FromNetwork" {
+		t.Errorf("api.Title = %q, want %q", api.Title, "FromNetwork")
+	}
+}
+
+func TestLoadAPISendsNoCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("request carried an Authorization header %q; the loader must never authenticate", auth)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openapi":"3.0.1","info":{"title":"NoAuth","version":"1"},"paths":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := loadAPI(context.Background(), detect.Target{SpecURL: srv.URL + "/openapi.json"}); err != nil {
+		t.Fatalf("loadAPI: %v", err)
+	}
+}
+
+func TestLoadAPIFailsClearlyWithNoKnownSpecLocation(t *testing.T) {
+	_, err := loadAPI(context.Background(), detect.Target{Title: "mystery"})
+	if err == nil {
+		t.Fatal("want an error when a target has neither SpecPath nor SpecURL")
+	}
+	if !strings.Contains(err.Error(), "mystery") {
+		t.Errorf("error = %q, want it to name the target", err)
+	}
+	if code := output.ExitCodeFor(err); code != output.ExitConfig {
+		t.Errorf("exit code = %d, want %d", code, output.ExitConfig)
+	}
+}
+
+func TestLoadAPIReportsAnUnreachableHost(t *testing.T) {
+	_, err := loadAPI(context.Background(), detect.Target{SpecURL: "http://127.0.0.1:1/openapi.json"})
+	if err == nil {
+		t.Fatal("want an error when the spec host cannot be reached")
+	}
+	if code := output.ExitCodeFor(err); code != output.ExitTransport {
+		t.Errorf("exit code = %d, want %d", code, output.ExitTransport)
 	}
 }
