@@ -70,7 +70,7 @@ func exitError(err error) error {
 		errors.Is(err, context.Canceled):
 		return nil
 	default:
-		return output.WithCode(err, output.ExitUsage)
+		return err
 	}
 }
 

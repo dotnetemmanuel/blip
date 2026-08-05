@@ -25,8 +25,8 @@ func TestRunRefusesWithoutATerminal(t *testing.T) {
 	if !strings.Contains(err.Error(), "terminal") {
 		t.Errorf("want the error to say it needs a terminal, got %q", err)
 	}
-	if code := output.ExitCodeFor(err); code == output.ExitOK {
-		t.Errorf("want a non-zero exit code, got %d", code)
+	if code := output.ExitCodeFor(err); code != output.ExitUsage {
+		t.Errorf("want exit code %d, got %d", output.ExitUsage, code)
 	}
 }
 
@@ -63,8 +63,8 @@ func TestOnlyADeliberateStopExitsClean(t *testing.T) {
 	}
 
 	broken := fmt.Errorf("%w: %w", tea.ErrProgramKilled, errors.New("read /dev/tty: input/output error"))
-	if code := output.ExitCodeFor(exitError(broken)); code == output.ExitOK {
-		t.Error("a terminal that died mid-session must not report success")
+	if code := output.ExitCodeFor(exitError(broken)); code != output.ExitInternal {
+		t.Errorf("a terminal that died mid-session must exit %d, got %d", output.ExitInternal, code)
 	}
 
 	panicked := fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrProgramPanic)
