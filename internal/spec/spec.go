@@ -87,6 +87,11 @@ type Fetcher struct {
 	// unauthenticated attempt has been refused, so a public spec never reaches for
 	// a vault.
 	Authorize func(ctx context.Context, req *http.Request) error
+
+	// SkipNegativeCache stops a fruitless probe from writing the marker that
+	// makes a later run refuse to re-probe. A caller that merely browses (blip
+	// ui) must not change what a later, unrelated `blip describe` does.
+	SkipNegativeCache bool
 }
 
 func configError(format string, args ...any) error {
@@ -247,7 +252,7 @@ func (f *Fetcher) Load(ctx context.Context, apiName string, env *config.Environm
 		return &Spec{Data: cached, Meta: cachedMeta, Path: specPath(dir), Status: StatusStale}, nil
 	}
 
-	if len(reachable) > 0 && !transient {
+	if len(reachable) > 0 && !transient && !f.SkipNegativeCache {
 		rememberNoSpec(dir)
 	}
 	return nil, f.noSpecError(env, reachable, unreachable)

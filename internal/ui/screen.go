@@ -24,8 +24,13 @@ const (
 )
 
 // loadCmd starts loading the chosen target's spec. ctx bounds it, so quitting
-// mid-load does not leave a fetch running behind the closed screen.
+// mid-load does not leave a fetch running behind the closed screen. Both call
+// sites already guard on m.loadAPI != nil, but the check stays here too since
+// a nil LoadAPIFunc must never be dialled, guard or no guard upstream.
 func (m Model) loadCmd() tea.Cmd {
+	if m.loadAPI == nil {
+		return nil
+	}
 	ctx, loadAPI, target := m.ctx, m.loadAPI, m.chosen
 	return func() tea.Msg {
 		api, err := loadAPI(ctx, target)
@@ -61,14 +66,38 @@ func (m *Model) updateBrowsing(msg tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
-// applyWidths splits the screen between the list and the detail pane. Called
-// once per resize and once when a spec finishes loading, never per frame:
-// detailModel caches its rendered markdown against width, and feeding it a
-// fresh value every View() would defeat that cache.
-func (m *Model) applyWidths() {
+// textEntryActive reports whether the focused pane is reading free text right
+// now, so that a plain "q" types a letter there instead of quitting. Only
+// ctrl+c is guaranteed to quit unconditionally. Task 12's Fill pane will add
+// another case here.
+func (m Model) textEntryActive() bool {
+	return m.mode == modeBrowsing && m.list.searching
+}
+
+// chromeLines is how many lines View draws around the panes: the title, a
+// blank line, then (after the panes) another blank line and the footer.
+const chromeLines = 4
+
+// applyLayout splits the screen between the list and the detail pane, and
+// gives the list the height it has left to scroll within. Called once per
+// resize and once when a spec finishes loading, never per frame: detailModel
+// caches its rendered markdown against width, and feeding it a fresh value
+// every View() would defeat that cache.
+func (m *Model) applyLayout() {
 	left, right := splitWidths(m.width)
 	m.list.SetWidth(left)
 	m.detail.SetWidth(right)
+	m.list.SetHeight(contentHeight(m.height))
+}
+
+// contentHeight is how many rows the list can show once the chrome around it
+// is accounted for, clamped to zero rather than left negative.
+func contentHeight(height int) int {
+	h := height - chromeLines
+	if h < 0 {
+		return 0
+	}
+	return h
 }
 
 // splitWidths gives the list roughly two fifths of the screen and the detail
@@ -122,7 +151,25 @@ func (m Model) viewChoosing() string {
 }
 
 // viewBrowsing lays the list and the detail pane side by side, each already
-// wrapped to the width applyWidths gave it.
+// wrapped to the width applyLayout gave it, with any banner above them.
 func (m Model) viewBrowsing() string {
-	return lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), " ", m.detail.View())
+	panes := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), " ", m.detail.View())
+	if banner := m.browsingBanner(); banner != "" {
+		return banner + "\n" + panes
+	}
+	return panes
+}
+
+// browsingBanner surfaces anything the loader collected instead of writing to
+// the real terminal (Fetcher.Warnf lands here), so a cached spec served while
+// the backend is down does not read as current.
+func (m Model) browsingBanner() string {
+	lines := append([]string(nil), m.warnings...)
+	if m.stale && len(lines) == 0 {
+		lines = append(lines, "browsing a cached spec; the service could not be reached to refresh it")
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return m.styled(m.theme.Warning).Render(strings.Join(lines, "\n"))
 }

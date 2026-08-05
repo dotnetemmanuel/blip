@@ -242,7 +242,25 @@ func TestNothingIsDrawnWiderThanTheScreen(t *testing.T) {
 	failed.err = errors.New("this .blip.toml names an environment that the file itself never declares anywhere")
 	failed.ledger = empty.ledger
 
-	for name, m := range map[string]Model{"no API found": empty, "targets": found, "failure": failed} {
+	// D: the browsing footer is 51 columns unwrapped, well past 40, and it is
+	// drawn by every browsing screen regardless of what is selected.
+	browsing := sized.(Model)
+	browsing.mode = modeBrowsing
+	browsing.list.SetAPI(mustParse(t, sampleSpec))
+	browsing.detail.SetOperation(browsing.list.Selected())
+
+	choosing := sized.(Model)
+	choosing.mode = modeChoosing
+	choosing.targets = []detect.Target{
+		{Title: "a service with a very long name indeed", BaseURL: "http://localhost:5080"},
+		{Title: "another one, also fairly verbose about it"},
+	}
+
+	screens := map[string]Model{
+		"no API found": empty, "targets": found, "failure": failed,
+		"browsing": browsing, "choosing": choosing,
+	}
+	for name, m := range screens {
 		for _, line := range strings.Split(m.View(), "\n") {
 			if w := lipgloss.Width(line); w > width {
 				t.Errorf("%s: line is %d columns on a %d column screen: %q", name, w, width, line)

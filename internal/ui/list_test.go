@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -448,4 +449,61 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// manyOpsSpec builds a single-group API with n operations, for exercising
+// scrolling: real fixtures in this package top out around a dozen operations.
+func manyOpsSpec(n int) string {
+	paths := make([]string, n)
+	for i := 0; i < n; i++ {
+		paths[i] = fmt.Sprintf(
+			`"/api/items/%d":{"get":{"tags":["Items"],"operationId":"getItem%d","summary":"Get item %d","responses":{"200":{"description":"OK"}}}}`,
+			i, i, i)
+	}
+	return fmt.Sprintf(`{"openapi":"3.0.1","info":{"title":"Many","version":"1"},"paths":{%s}}`, strings.Join(paths, ","))
+}
+
+// A window shorter than the list must still keep the cursor on screen, at
+// both the top and the bottom of a list longer than that window.
+func TestListScrollsToKeepTheSelectedRowVisible(t *testing.T) {
+	m := newListModel(theme.Theme{})
+	m.SetAPI(mustParse(t, manyOpsSpec(30)))
+	m.SetHeight(5)
+
+	start, end := m.visibleWindow()
+	if start != 0 {
+		t.Errorf("start = %d, want 0 at the top of the list", start)
+	}
+	if m.cursor < start || m.cursor >= end {
+		t.Fatalf("cursor %d outside the visible window [%d,%d) at the top", m.cursor, start, end)
+	}
+	if end-start > 5 {
+		t.Errorf("window shows %d rows, want at most the height of 5", end-start)
+	}
+
+	m.moveUp() // wraps straight from the first operation to the last
+
+	start, end = m.visibleWindow()
+	if end != len(m.rows) {
+		t.Errorf("end = %d, want %d: the window should have scrolled to the bottom", end, len(m.rows))
+	}
+	if m.cursor < start || m.cursor >= end {
+		t.Fatalf("cursor %d outside the visible window [%d,%d) at the bottom", m.cursor, start, end)
+	}
+	if end-start > 5 {
+		t.Errorf("window shows %d rows, want at most the height of 5", end-start)
+	}
+}
+
+// A list that fits inside the height must not scroll at all: clamping start
+// to n-height when n < height would push it negative.
+func TestListWithFewerRowsThanHeightShowsThemAll(t *testing.T) {
+	m := newListModel(theme.Theme{})
+	m.SetAPI(mustParse(t, sampleSpec))
+	m.SetHeight(50)
+
+	start, end := m.visibleWindow()
+	if start != 0 || end != len(m.rows) {
+		t.Errorf("visibleWindow() = (%d,%d), want the whole list (0,%d)", start, end, len(m.rows))
+	}
 }

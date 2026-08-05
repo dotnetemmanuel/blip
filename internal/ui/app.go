@@ -103,6 +103,13 @@ type Model struct {
 	chosen       detect.Target
 	loadErr      error
 
+	// stale and warnings ride in on a successful loadedMsg: stale marks a
+	// spec served from the cache because the backend could not be reached,
+	// and warnings is whatever the loader's Fetcher.Warnf collected instead
+	// of writing to the real terminal.
+	stale    bool
+	warnings []string
+
 	list   listModel
 	detail detailModel
 }
@@ -153,17 +160,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.applyWidths()
+		m.applyLayout()
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		// ctrl+c is the only key that always quits. A plain "q" quits
+		// everywhere except while a pane is reading free text, where it must
+		// type a letter instead: see textEntryActive.
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		if msg.String() == "q" && !m.textEntryActive() {
 			return m, tea.Quit
 		}
 		switch m.mode {
 		case modeChoosing:
-			return m, m.updateChoosing(msg)
+			cmd := m.updateChoosing(msg)
+			return m, cmd
 		case modeBrowsing:
-			return m, m.updateBrowsing(msg)
+			cmd := m.updateBrowsing(msg)
+			return m, cmd
 		}
 	case discoveredMsg:
 		m.discovering = false
@@ -186,8 +200,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = modeBrowsing
+		m.stale = msg.api.Stale
+		m.warnings = msg.api.Warnings
 		m.list.SetAPI(msg.api)
-		m.applyWidths()
+		m.applyLayout()
 		m.detail.SetOperation(m.list.Selected())
 	}
 	return m, nil
@@ -198,33 +214,44 @@ func (m Model) View() string {
 	b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Primary).Render("blip"))
 	b.WriteString("\n\n")
 
-	switch {
-	case m.discovering:
-		b.WriteString("looking for an API in this repo")
-	case m.err != nil:
-		b.WriteString(m.styled(m.theme.Error).Render(m.err.Error()))
-		b.WriteString(m.ledgerLines())
-	case len(m.targets) == 0:
-		b.WriteString("no API found")
-		b.WriteString(m.ledgerLines())
-	case m.mode == modeChoosing:
+	switch m.mode {
+	case modeChoosing:
 		b.WriteString(m.viewChoosing())
-	case m.mode == modeLoading:
+	case modeLoading:
 		b.WriteString(m.wrapped().Render("loading the spec for " + m.chosen.Title))
-	case m.mode == modeFailed:
+	case modeFailed:
 		b.WriteString(m.styled(m.theme.Error).Render(m.loadErr.Error()))
 		b.WriteString(m.ledgerLines())
-	case m.mode == modeBrowsing:
+	case modeBrowsing:
 		b.WriteString(m.viewBrowsing())
-	default:
-		for _, t := range m.targets {
-			b.WriteString(m.wrapped().Render(fmt.Sprintf("%s  %s", t.Title, m.reachability(t))) + "\n")
-		}
+	default: // modeTargets: discovery is still running, failed, empty, or a plain listing.
+		b.WriteString(m.viewTargets())
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Muted).Render(m.footer()))
+	b.WriteString(m.styled(m.theme.Muted).Render(m.footer()))
 	return b.String()
+}
+
+// viewTargets is what the screen shows before a target has been committed to:
+// discovery in progress, discovery failed outright, nothing found, or (with a
+// nil LoadAPI, the only way modeTargets survives past discovery) the plain
+// reachability listing that existed before browsing did.
+func (m Model) viewTargets() string {
+	switch {
+	case m.discovering:
+		return "looking for an API in this repo"
+	case m.err != nil:
+		return m.styled(m.theme.Error).Render(m.err.Error()) + m.ledgerLines()
+	case len(m.targets) == 0:
+		return "no API found" + m.ledgerLines()
+	default:
+		var b strings.Builder
+		for _, t := range m.targets {
+			b.WriteString(m.wrapped().Render(fmt.Sprintf("%s  %s", t.Title, m.reachability(t))) + "\n")
+		}
+		return b.String()
+	}
 }
 
 // reachability keeps detect's reason for an uncallable target on screen, rather

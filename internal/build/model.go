@@ -139,6 +139,11 @@ type API struct {
 
 	// Warnings are things the user should fix upstream, reported once.
 	Warnings []string `json:"-"`
+
+	// Stale marks a document served from a cache that could not be refreshed
+	// because the backend was unreachable, so it may not match what a request
+	// would see right now.
+	Stale bool `json:"-"`
 }
 
 // Groups lists the group names in the order they should appear.

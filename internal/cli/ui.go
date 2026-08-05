@@ -2,11 +2,9 @@ package cli
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,6 +16,7 @@ import (
 	"github.com/dotnetemmanuel/blip/internal/detect"
 	"github.com/dotnetemmanuel/blip/internal/output"
 	"github.com/dotnetemmanuel/blip/internal/request"
+	"github.com/dotnetemmanuel/blip/internal/spec"
 	"github.com/dotnetemmanuel/blip/internal/theme"
 	"github.com/dotnetemmanuel/blip/internal/ui"
 )
@@ -52,7 +51,7 @@ func newUICommand(rt *Runtime) *cobra.Command {
 				StdoutIsTTY: rt.StdoutIsTTY,
 				Theme:       defaultTheme(),
 				Discover:    discoverIn(root),
-				LoadAPI:     loadAPI,
+				LoadAPI:     loadAPIFor(rt),
 			})
 		},
 	}
@@ -67,68 +66,91 @@ func (rt *Runtime) uiInput() io.Reader {
 	return rt.Stdin
 }
 
-// loadTimeout bounds a single spec fetch, same order of magnitude as discovery.
-const loadTimeout = 5 * time.Second
-
-// loadAPI is ui.Options.LoadAPI: it turns a discovered target into a parsed
-// API. It takes a target and nothing else, so it has no credential source to
-// reach for even by mistake; an authenticated spec therefore fails to load
-// here, and that failure is reported on screen rather than worked around.
-func loadAPI(ctx context.Context, target detect.Target) (*build.API, error) {
-	if target.SpecPath != "" {
-		data, err := os.ReadFile(target.SpecPath)
-		if err != nil {
-			return nil, output.WithCode(fmt.Errorf("reading %s: %w", target.SpecPath, err), output.ExitTransport)
+// loadAPIFor is ui.Options.LoadAPI: it turns a discovered target into a parsed
+// API. The loader stays two-branch: read SpecPath from disk when rung 2 set
+// one, otherwise use the fetcher when the target carries an Env (rung 1, 3 or
+// 4), and only when neither holds is browsing refused. It never resolves
+// credentials: it takes a target and nothing else, and fetchAPI leaves
+// Fetcher.Authorize nil, so an authenticated spec fails to load here rather
+// than reaching for a vault.
+func loadAPIFor(rt *Runtime) ui.LoadAPIFunc {
+	return func(ctx context.Context, target detect.Target) (*build.API, error) {
+		if target.SpecPath != "" {
+			data, err := os.ReadFile(target.SpecPath)
+			if err != nil {
+				return nil, output.WithCode(fmt.Errorf("reading %s: %w", target.SpecPath, err), output.ExitTransport)
+			}
+			return build.Parse(data)
 		}
-		return build.Parse(data)
+		if target.Env == nil {
+			return nil, output.Configf(
+				"%s has no spec file on disk and no base URL to probe for one; set spec_url or base_url in .blip.toml and try again",
+				target.Title)
+		}
+		return fetchAPI(ctx, rt, target)
 	}
-	if target.SpecURL == "" {
-		return nil, output.Configf("%s has no known spec location to browse", target.Title)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, loadTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.SpecURL, nil)
-	if err != nil {
-		return nil, output.WithCode(fmt.Errorf("building a request for %s: %w", target.SpecURL, err), output.ExitInternal)
-	}
-	req.Header.Set("Accept", "application/json, application/yaml;q=0.9, */*;q=0.5")
-
-	resp, err := unauthenticatedSpecClient(target.SpecURL).Do(req)
-	if err != nil {
-		return nil, output.WithCode(fmt.Errorf("fetching %s: %w", target.SpecURL, err), output.ExitTransport)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, output.WithCode(fmt.Errorf("reading the response from %s: %w", target.SpecURL, err), output.ExitTransport)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, output.WithCode(fmt.Errorf("%s returned %d", target.SpecURL, resp.StatusCode), output.ExitTransport)
-	}
-	return build.Parse(body)
 }
 
-// unauthenticatedSpecClient relaxes TLS only for a spec URL whose own host is
-// loopback, and always applies the redirect policy so that relaxation cannot
-// be carried to somewhere else by a redirect.
-func unauthenticatedSpecClient(specURL string) *http.Client {
-	client := &http.Client{Timeout: loadTimeout, CheckRedirect: request.CheckRedirect}
+// fetchAPI mirrors Runtime.API: the same probing, ETag cache and
+// hand-declared [[route]] merging, minus the Authenticator. A caller that
+// only browses must not leave behind the marker that makes a later, unrelated
+// run refuse to re-probe, hence SkipNegativeCache. Warnf is bound to a
+// collector rather than to stderr: bubbletea owns the screen while this runs,
+// and writing to the real terminal underneath it would corrupt the frame.
+func fetchAPI(ctx context.Context, rt *Runtime, target detect.Target) (*build.API, error) {
+	env := target.Env
 
-	u, err := url.Parse(specURL)
-	if err != nil || u.Scheme != "https" || !config.IsLocalHost(u.Hostname()) {
-		return client
+	client, err := request.NewClient(env, rt.Globals.Timeout)
+	if err != nil {
+		return nil, err
 	}
-	transport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return client
+	strict, err := request.NewStrictClient(env, rt.Globals.Timeout)
+	if err != nil {
+		return nil, err
 	}
-	t := transport.Clone()
-	t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	client.Transport = t
-	return client
+
+	apiName := target.Title
+	var routes []build.Route
+	if cfg, cfgErr := rt.Config(); cfgErr == nil {
+		apiName = cfg.Name
+		routes = declaredRoutes(cfg)
+	}
+
+	var warnings []string
+	fetcher := &spec.Fetcher{
+		Client:            client,
+		Strict:            strict,
+		Refresh:           rt.Globals.Refresh,
+		Offline:           rt.Globals.Offline,
+		SkipNegativeCache: true,
+		Warnf: func(format string, args ...any) {
+			warnings = append(warnings, fmt.Sprintf(format, args...))
+		},
+	}
+
+	s, specErr := fetcher.Load(ctx, apiName, env)
+
+	var api *build.API
+	switch {
+	case specErr == nil:
+		api, err = build.Parse(s.Data)
+		if err != nil {
+			return nil, err
+		}
+	case len(routes) > 0:
+		// A repo whose API is entirely hand-declared must not show an empty
+		// screen just because there is no spec to go with the routes.
+		api = &build.API{Title: apiName}
+	default:
+		return nil, specErr
+	}
+
+	if err := api.AddRoutes(routes); err != nil {
+		return nil, err
+	}
+	api.Warnings = append(api.Warnings, warnings...)
+	api.Stale = s != nil && s.Status == spec.StatusStale
+	return api, nil
 }
 
 func discoverIn(root string) ui.DiscoverFunc {

@@ -3,15 +3,20 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/dotnetemmanuel/blip/internal/config"
 	"github.com/dotnetemmanuel/blip/internal/detect"
 	"github.com/dotnetemmanuel/blip/internal/output"
+	"github.com/dotnetemmanuel/blip/internal/spec"
 )
 
 func TestUIRefusesWhenStdoutIsNotATerminal(t *testing.T) {
@@ -103,22 +108,42 @@ func TestTheDefaultThemeHasColors(t *testing.T) {
 	}
 }
 
+// testEnv builds a bare config.Environment for tests that exercise fetchAPI
+// directly, without going through a .blip.toml.
+func testEnv(t *testing.T, baseURL, specURL string) *config.Environment {
+	t.Helper()
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &config.Environment{Name: "dev", BaseURL: u, SpecURL: specURL, Timeout: 5 * time.Second}
+}
+
+// blankRuntime is a Runtime with no .blip.toml in reach, isolated from the
+// real spec cache. It is what a target from rung 2, 3 or 4 loads against:
+// there is no config to merge routes from.
+func blankRuntime(t *testing.T) *Runtime {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	return &Runtime{Globals: &Globals{}, Dir: t.TempDir(), Stderr: &bytes.Buffer{}}
+}
+
 func TestLoadAPIReadsSpecPathFromDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "openapi.json")
 	if err := os.WriteFile(path, []byte(`{"openapi":"3.0.1","info":{"title":"OnDisk","version":"1"},"paths":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	api, err := loadAPI(context.Background(), detect.Target{SpecPath: path})
+	api, err := loadAPIFor(blankRuntime(t))(context.Background(), detect.Target{SpecPath: path})
 	if err != nil {
-		t.Fatalf("loadAPI: %v", err)
+		t.Fatalf("loadAPIFor: %v", err)
 	}
 	if api.Title != "OnDisk" {
 		t.Errorf("api.Title = %q, want %q", api.Title, "OnDisk")
 	}
 }
 
-func TestLoadAPIPrefersSpecPathOverSpecURL(t *testing.T) {
+func TestLoadAPIPrefersSpecPathOverTheFetcher(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "openapi.json")
 	if err := os.WriteFile(path, []byte(`{"openapi":"3.0.1","info":{"title":"FromDisk","version":"1"},"paths":{}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -128,21 +153,22 @@ func TestLoadAPIPrefersSpecPathOverSpecURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 	t.Cleanup(srv.Close)
 
-	api, err := loadAPI(context.Background(), detect.Target{SpecPath: path, SpecURL: srv.URL + "/openapi.json"})
+	target := detect.Target{SpecPath: path, Env: testEnv(t, srv.URL, srv.URL+"/openapi.json")}
+	api, err := loadAPIFor(blankRuntime(t))(context.Background(), target)
 	if err != nil {
-		t.Fatalf("loadAPI: %v", err)
+		t.Fatalf("loadAPIFor: %v", err)
 	}
 	if api.Title != "FromDisk" {
 		t.Errorf("api.Title = %q, want the document on disk, not the network", api.Title)
 	}
 	if called {
-		t.Error("loadAPI fetched SpecURL even though SpecPath was set; rung 2 must never touch the network")
+		t.Error("loadAPIFor fetched over the network even though SpecPath was set; rung 2 must never touch the network")
 	}
 }
 
-func TestLoadAPIFetchesSpecURLWhenThereIsNoSpecPath(t *testing.T) {
+func TestLoadAPIProbesWhenThereIsNoSpecPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/openapi.json" {
+		if r.URL.Path != "/openapi/v1.json" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -151,9 +177,10 @@ func TestLoadAPIFetchesSpecURLWhenThereIsNoSpecPath(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	api, err := loadAPI(context.Background(), detect.Target{SpecURL: srv.URL + "/openapi.json"})
+	target := detect.Target{Env: testEnv(t, srv.URL, "")}
+	api, err := loadAPIFor(blankRuntime(t))(context.Background(), target)
 	if err != nil {
-		t.Fatalf("loadAPI: %v", err)
+		t.Fatalf("loadAPIFor: %v", err)
 	}
 	if api.Title != "FromNetwork" {
 		t.Errorf("api.Title = %q, want %q", api.Title, "FromNetwork")
@@ -170,18 +197,41 @@ func TestLoadAPISendsNoCredentials(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if _, err := loadAPI(context.Background(), detect.Target{SpecURL: srv.URL + "/openapi.json"}); err != nil {
-		t.Fatalf("loadAPI: %v", err)
+	target := detect.Target{Env: testEnv(t, srv.URL, srv.URL+"/openapi.json")}
+	if _, err := loadAPIFor(blankRuntime(t))(context.Background(), target); err != nil {
+		t.Fatalf("loadAPIFor: %v", err)
+	}
+}
+
+// A 401 must not make the loader retry with credentials: there is nowhere for
+// it to get any, and it must not go looking.
+func TestLoadAPILeavesA401Unretried(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	target := detect.Target{Env: testEnv(t, srv.URL, "")}
+	if _, err := loadAPIFor(blankRuntime(t))(context.Background(), target); err == nil {
+		t.Fatal("want an error: every candidate returned 401")
+	}
+	if requests != len(spec.ProbePaths) {
+		t.Errorf("requests = %d, want exactly one per probe path with no retry", requests)
 	}
 }
 
 func TestLoadAPIFailsClearlyWithNoKnownSpecLocation(t *testing.T) {
-	_, err := loadAPI(context.Background(), detect.Target{Title: "mystery"})
+	_, err := loadAPIFor(blankRuntime(t))(context.Background(), detect.Target{Title: "mystery"})
 	if err == nil {
-		t.Fatal("want an error when a target has neither SpecPath nor SpecURL")
+		t.Fatal("want an error when a target has neither SpecPath nor Env")
 	}
 	if !strings.Contains(err.Error(), "mystery") {
 		t.Errorf("error = %q, want it to name the target", err)
+	}
+	if !strings.Contains(err.Error(), "spec_url") && !strings.Contains(err.Error(), "base_url") {
+		t.Errorf("error = %q, want it to name a remedy", err)
 	}
 	if code := output.ExitCodeFor(err); code != output.ExitConfig {
 		t.Errorf("exit code = %d, want %d", code, output.ExitConfig)
@@ -189,11 +239,182 @@ func TestLoadAPIFailsClearlyWithNoKnownSpecLocation(t *testing.T) {
 }
 
 func TestLoadAPIReportsAnUnreachableHost(t *testing.T) {
-	_, err := loadAPI(context.Background(), detect.Target{SpecURL: "http://127.0.0.1:1/openapi.json"})
+	target := detect.Target{Env: testEnv(t, "http://127.0.0.1:1", "")}
+	_, err := loadAPIFor(blankRuntime(t))(context.Background(), target)
 	if err == nil {
 		t.Fatal("want an error when the spec host cannot be reached")
 	}
 	if code := output.ExitCodeFor(err); code != output.ExitTransport {
 		t.Errorf("exit code = %d, want %d", code, output.ExitTransport)
+	}
+}
+
+// writeConfig drops a minimal .blip.toml so rt.Config() resolves for real,
+// the way a rung-1 target's loader call always finds one.
+func writeConfig(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".blip.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func configuredTarget(t *testing.T, rt *Runtime) detect.Target {
+	t.Helper()
+	cfg, err := rt.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := cfg.ResolveEnv("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return detect.Target{Title: cfg.Name, Env: env}
+}
+
+// The ordinary CLI works against blip-sandbox's own .blip.toml with the
+// service down, because it uses the ETag cache. The ui loader must too.
+func TestFetchAPIUsesTheCacheWhenTheServiceGoesDown(t *testing.T) {
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	dir := t.TempDir()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/v1.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openapi":"3.0.1","info":{"title":"Cached","version":"1"},"paths":{}}`))
+	}))
+	writeConfig(t, dir, fmt.Sprintf("name = \"cache-demo\"\ndefault_env = \"dev\"\n\n[env.dev]\nbase_url = %q\n", srv.URL))
+
+	rt := &Runtime{Globals: &Globals{}, Dir: dir, Stderr: &bytes.Buffer{}}
+	target := configuredTarget(t, rt)
+
+	api, err := loadAPIFor(rt)(context.Background(), target)
+	if err != nil {
+		t.Fatalf("first load (service up): %v", err)
+	}
+	if api.Stale {
+		t.Error("the first load should not be flagged stale; the service just answered")
+	}
+
+	srv.Close()
+
+	// A fresh Runtime: a later `blip ui` is a separate process.
+	stderr := &bytes.Buffer{}
+	rt2 := &Runtime{Globals: &Globals{}, Dir: dir, Stderr: stderr}
+	target2 := configuredTarget(t, rt2)
+
+	api2, err := loadAPIFor(rt2)(context.Background(), target2)
+	if err != nil {
+		t.Fatalf("second load (service down) should succeed from the cache: %v", err)
+	}
+	if !api2.Stale {
+		t.Error("want the second load flagged stale: it came from the cache because the service is down")
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("Warnf wrote to the real terminal while bubbletea owns the screen: %q", stderr.String())
+	}
+	found := false
+	for _, w := range api2.Warnings {
+		if strings.Contains(w, "cache") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a warning about the cache carried back on api.Warnings, got %v", api2.Warnings)
+	}
+}
+
+// A probe that finds nothing must not change what a later, unrelated plain
+// command does: browsing is read-only with respect to the rest of blip.
+func TestFetchAPIProbingLeavesNoMarkerForALaterPlainRun(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	writeConfig(t, dir, fmt.Sprintf("name = \"probe-demo\"\ndefault_env = \"dev\"\n\n[env.dev]\nbase_url = %q\n", srv.URL))
+
+	rt := &Runtime{Globals: &Globals{}, Dir: dir, Stderr: &bytes.Buffer{}}
+	target := configuredTarget(t, rt)
+
+	if _, err := loadAPIFor(rt)(context.Background(), target); err == nil {
+		t.Fatal("want an error: the server serves no spec anywhere")
+	}
+	probed := requests
+	if probed == 0 {
+		t.Fatal("test setup: the loader never actually probed the server")
+	}
+
+	cfg, err := rt.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := cfg.ResolveEnv("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := &spec.Fetcher{Client: srv.Client()}
+	if _, err := plain.Load(context.Background(), cfg.Name, env); err == nil {
+		t.Fatal("Load succeeded with no spec anywhere")
+	}
+	if requests == probed {
+		t.Error("a later plain run skipped probing, as if the ui session had left a no-spec marker behind")
+	}
+}
+
+// A repo whose API is entirely hand-declared must not show an empty screen
+// just because there is no spec behind it.
+func TestFetchAPIFallsBackToDeclaredRoutesWhenTheSpecCannotBeFetched(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+	writeConfig(t, dir, "name = \"routes-only\"\ndefault_env = \"dev\"\n\n"+
+		"[env.dev]\nbase_url = \"http://127.0.0.1:1\"\n\n"+
+		"[[route]]\nname = \"reindex\"\nmethod = \"POST\"\npath = \"/admin/reindex/{tenant}\"\nsummary = \"Rebuild the index\"\n")
+
+	rt := &Runtime{Globals: &Globals{}, Dir: dir, Stderr: &bytes.Buffer{}}
+	target := configuredTarget(t, rt)
+
+	api, err := loadAPIFor(rt)(context.Background(), target)
+	if err != nil {
+		t.Fatalf("want the hand-declared route to fill the screen even though the spec is unreachable: %v", err)
+	}
+	if api.Find("reindex") == nil {
+		t.Errorf("want the reindex route in the API, got operations %+v", api.Operations)
+	}
+}
+
+// Routes must be merged alongside a spec that did load, not only as a
+// fallback when it fails.
+func TestFetchAPIMergesDeclaredRoutesAlongsideASuccessfulSpec(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/v1.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openapi":"3.0.1","info":{"title":"WithRoutes","version":"1"},"paths":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+	writeConfig(t, dir, fmt.Sprintf("name = \"with-routes\"\ndefault_env = \"dev\"\n\n[env.dev]\nbase_url = %q\n\n"+
+		"[[route]]\nname = \"reindex\"\nmethod = \"POST\"\npath = \"/admin/reindex/{tenant}\"\nsummary = \"Rebuild the index\"\n", srv.URL))
+
+	rt := &Runtime{Globals: &Globals{}, Dir: dir, Stderr: &bytes.Buffer{}}
+	target := configuredTarget(t, rt)
+
+	api, err := loadAPIFor(rt)(context.Background(), target)
+	if err != nil {
+		t.Fatalf("loadAPIFor: %v", err)
+	}
+	if api.Find("reindex") == nil {
+		t.Errorf("want the reindex route merged alongside the fetched spec, got operations %+v", api.Operations)
 	}
 }

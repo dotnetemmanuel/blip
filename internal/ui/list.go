@@ -24,8 +24,9 @@ type listRow struct {
 // group-to-group hopping. It knows nothing about the terminal beyond its width;
 // everything happens by message, per the rest of this package.
 type listModel struct {
-	theme theme.Theme
-	width int
+	theme  theme.Theme
+	width  int
+	height int
 
 	api    *build.API
 	folded map[string]bool
@@ -57,6 +58,32 @@ func (m *listModel) SetAPI(api *build.API) {
 // SetWidth records the screen width rows should wrap to.
 func (m *listModel) SetWidth(width int) {
 	m.width = width
+}
+
+// SetHeight records how many rows are visible at once. View keeps the cursor
+// inside that window, scrolling as it moves, rather than letting bubbletea's
+// own line-clipping carry the selection off the top of the screen.
+func (m *listModel) SetHeight(height int) {
+	m.height = height
+}
+
+// visibleWindow returns the row range [start, end) that height allows, kept
+// centered on the cursor and clamped to the ends of the list. It is computed
+// fresh at render time from the cursor's current position, so no cursor-moving
+// method needs to separately track a scroll offset.
+func (m listModel) visibleWindow() (start, end int) {
+	n := len(m.rows)
+	if m.height <= 0 || n <= m.height {
+		return 0, n
+	}
+	start = m.cursor - m.height/2
+	if start < 0 {
+		start = 0
+	}
+	if start+m.height > n {
+		start = n - m.height
+	}
+	return start, start + m.height
 }
 
 // Selected is the operation the cursor rests on. It is nil when the cursor
@@ -360,13 +387,15 @@ func (m *listModel) indexOfFullName(name string) (int, bool) {
 	return 0, false
 }
 
-// View renders every visible row: a fold marker and name for a header, a
-// method badge and path for an operation. A deprecated operation renders
-// entirely in Muted, badge included, so it never reads as safe to call.
+// View renders the rows height allows, scrolled to keep the cursor visible: a
+// fold marker and name for a header, a method badge and path for an
+// operation. A deprecated operation renders entirely in Muted, badge
+// included, so it never reads as safe to call.
 func (m listModel) View() string {
 	var b strings.Builder
-	for i, r := range m.rows {
-		b.WriteString(m.renderRow(r, i == m.cursor))
+	start, end := m.visibleWindow()
+	for i := start; i < end; i++ {
+		b.WriteString(m.renderRow(m.rows[i], i == m.cursor))
 		b.WriteString("\n")
 	}
 	if m.searching {

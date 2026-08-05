@@ -249,7 +249,11 @@ func TestSplitWidthsNeverGoNegative(t *testing.T) {
 }
 
 // A window too narrow for a sane split must still show something from each
-// pane, not silently starve one of them down to nothing.
+// pane, not silently starve one of them down to nothing. Checked against each
+// pane's own View() separately: checking the joined string only proves the
+// substring is somewhere in the screen, and at some widths that is satisfiable
+// by the list pane alone (its rows carry the same path text the detail
+// header does), which would pass even if the detail pane were empty.
 func TestNarrowWindowStillShowsBothPanes(t *testing.T) {
 	m := New(context.Background(), Options{})
 	m.list.SetAPI(mustParse(t, sampleSpec))
@@ -257,18 +261,148 @@ func TestNarrowWindowStillShowsBothPanes(t *testing.T) {
 	m.targets = []detect.Target{{Title: "sample"}}
 	m.detail.SetOperation(m.list.Selected())
 
-	next, _ := m.Update(tea.WindowSizeMsg{Width: 10, Height: 5})
+	// Height generous enough that this test is only about width; E covers
+	// height separately.
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
 	m = next.(Model)
 
 	if m.list.width < 0 || m.detail.width < 0 {
 		t.Fatalf("pane widths went negative: list=%d detail=%d", m.list.width, m.detail.width)
 	}
 
-	view := stripANSI(m.View())
-	if !strings.Contains(view, "beta") {
-		t.Errorf("list pane content is missing from a narrow render, the list pane was starved:\n%s", view)
+	listView := stripANSI(m.list.View())
+	detailView := stripANSI(m.detail.View())
+	if !strings.Contains(listView, "beta") {
+		t.Errorf("list pane content is missing from a narrow render, the list pane was starved:\n%s", listView)
 	}
-	if !strings.Contains(view, "alpha") {
-		t.Errorf("detail pane content is missing from a narrow render, the detail pane was starved:\n%s", view)
+	if !strings.Contains(detailView, "alpha") {
+		t.Errorf("detail pane content is missing from a narrow render, the detail pane was starved:\n%s", detailView)
+	}
+}
+
+// browsingModel is a Model already past discovery and loading, cursor on the
+// first operation of sampleSpec, ready to receive key messages directly.
+func browsingModel(t *testing.T) Model {
+	t.Helper()
+	m := New(context.Background(), Options{})
+	m.list.SetAPI(mustParse(t, sampleSpec))
+	m.mode = modeBrowsing
+	m.targets = []detect.Target{{Title: "sample"}}
+	m.detail.SetOperation(m.list.Selected())
+	return m
+}
+
+// C, ruled by the human: while a pane is reading free text, typing wins. "q"
+// must type a letter into the search box rather than quit the program.
+func TestQTypesIntoTheSearchBoxInsteadOfQuitting(t *testing.T) {
+	m := browsingModel(t)
+
+	next, _ := m.Update(slash) // enters search
+	m = next.(Model)
+	if !m.list.searching {
+		t.Fatal("test setup: / did not enter search")
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m = next.(Model)
+
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("q quit the program while the search box was focused; it should have typed a letter")
+		}
+	}
+	if m.list.query != "q" {
+		t.Errorf("list.query = %q, want %q: q must be typed into the search box", m.list.query, "q")
+	}
+}
+
+// C: everywhere else, q still quits.
+func TestQStillQuitsWhileBrowsingAndNotSearching(t *testing.T) {
+	m := browsingModel(t)
+	if m.list.searching {
+		t.Fatal("test setup: should not be searching")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Fatal("want q to quit while browsing and not searching")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("want tea.QuitMsg, got %T", cmd())
+	}
+}
+
+// C, ruled by the human: ctrl+c quits unconditionally, in every state,
+// even out of a text-entry state where a plain q would type instead.
+func TestCtrlCQuitsEvenWhileSearching(t *testing.T) {
+	m := browsingModel(t)
+	next, _ := m.Update(slash)
+	m = next.(Model)
+	if !m.list.searching {
+		t.Fatal("test setup: / did not enter search")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("want ctrl+c to quit even while searching")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("want tea.QuitMsg, got %T", cmd())
+	}
+}
+
+// E: a window much shorter than the operation list must still keep the
+// selected row on screen as the cursor moves through the whole stack, not
+// just inside listModel in isolation.
+func TestShortWindowKeepsSelectionVisibleWhileBrowsing(t *testing.T) {
+	m := New(context.Background(), Options{})
+	m.list.SetAPI(mustParse(t, manyOpsSpec(30)))
+	m.mode = modeBrowsing
+	m.targets = []detect.Target{{Title: "many"}}
+	m.detail.SetOperation(m.list.Selected())
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 10})
+	m = next.(Model)
+
+	for i := 0; i < 25; i++ {
+		next, _ = m.Update(down)
+		m = next.(Model)
+	}
+
+	start, end := m.list.visibleWindow()
+	if m.list.cursor < start || m.list.cursor >= end {
+		t.Fatalf("cursor %d not inside the visible window [%d,%d) after scrolling through a tall list in a short window", m.list.cursor, start, end)
+	}
+}
+
+// A stale spec (served from the cache because the backend could not be
+// reached) must say so on the model and in the browsing view, not resolve to
+// an ordinary-looking loaded state.
+func TestStaleSpecIsFlaggedOnTheModelAndInTheBrowsingView(t *testing.T) {
+	api := mustParse(t, sampleSpec)
+	api.Stale = true
+	api.Warnings = []string{"could not refresh the spec, using the cache from 2020-01-01T00:00:00Z"}
+	target := detect.Target{Title: "sample"}
+
+	m := New(context.Background(), Options{
+		Discover: func(context.Context) ([]detect.Target, detect.Ledger, error) {
+			return []detect.Target{target}, detect.Ledger{}, nil
+		},
+		LoadAPI: func(context.Context, detect.Target) (*build.API, error) {
+			return api, nil
+		},
+	})
+
+	next, cmd := m.Update(m.Init()())
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+
+	if !m.stale {
+		t.Fatal("want m.stale set once a Stale api loads")
+	}
+	view := m.View()
+	if !strings.Contains(view, "could not refresh the spec, using the cache from") {
+		t.Errorf("view does not carry the stale warning:\n%s", view)
 	}
 }

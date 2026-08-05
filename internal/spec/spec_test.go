@@ -494,6 +494,48 @@ func TestNoSpecIsNotRememberedWhenTheHostIsUnreachable(t *testing.T) {
 	}
 }
 
+// A caller that only browses (blip ui) must not leave behind the marker that
+// makes a later, unrelated run refuse to re-probe.
+func TestSkipNegativeCacheLeavesNoMarkerBehind(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	f := &Fetcher{Client: srv.Client(), SkipNegativeCache: true}
+	e := env(t, srv.URL, "")
+
+	if _, err := f.Load(context.Background(), "legacy", e); err == nil {
+		t.Fatal("Load succeeded with no spec anywhere")
+	}
+
+	dir, err := CacheDir("legacy", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(noSpecMarker(dir)); err == nil {
+		t.Error("SkipNegativeCache did not stop the no-spec marker from being written")
+	}
+
+	// A later plain run, with the field left at its zero value, must probe
+	// again rather than trusting a marker that was never written.
+	requests := 0
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv2.Close()
+	plain := &Fetcher{Client: srv2.Client()}
+	e2 := env(t, srv2.URL, "")
+	if _, err := plain.Load(context.Background(), "legacy", e2); err == nil {
+		t.Fatal("Load succeeded with no spec anywhere")
+	}
+	if requests == 0 {
+		t.Error("a later plain run skipped probing, as if the browsing run had left a marker behind")
+	}
+}
+
 func TestUnchangedBytesCountAsRevalidatedWithoutAnETag(t *testing.T) {
 	// Microsoft.AspNetCore.OpenApi serves no ETag, so every run is a full fetch
 	// and only the bytes can say whether the spec actually moved.
