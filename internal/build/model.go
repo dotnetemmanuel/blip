@@ -53,6 +53,14 @@ type Body struct {
 	Fields      []Field `json:"fields,omitempty"`
 }
 
+// Response is one documented response of an operation, resolved for display.
+type Response struct {
+	Status   string `json:"status"`
+	Type     string `json:"type,omitempty"`
+	ItemType string `json:"item_type,omitempty"`
+	Schema   string `json:"schema,omitempty"`
+}
+
 // Operation is one callable endpoint.
 type Operation struct {
 	ID          string  `json:"id,omitempty"`
@@ -72,7 +80,8 @@ type Operation struct {
 	// Source says where the operation came from: the spec, or a [[route]] entry.
 	Source string `json:"source"`
 
-	responses map[string]*openapi3.SchemaRef
+	responses    map[string]*openapi3.SchemaRef
+	responseList []Response
 }
 
 // Sources an operation can come from.
@@ -104,6 +113,11 @@ func (o *Operation) PathParams() []Param {
 		}
 	}
 	return params
+}
+
+// Responses lists the operation's documented responses, sorted with "default" last.
+func (o *Operation) Responses() []Response {
+	return o.responseList
 }
 
 // ParamsIn returns the parameters of one kind, in spec order.

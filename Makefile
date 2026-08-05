@@ -49,7 +49,7 @@ tidy:
 # Rewrites the pinned describe --compact and --dry-run output. Deliberate act:
 # both are contracts a caller parses.
 golden:
-	go test ./internal/build ./internal/cli -update
+	go test ./internal/build ./internal/cli ./internal/ui -update
 
 dist:
 	@rm -rf dist && mkdir -p dist

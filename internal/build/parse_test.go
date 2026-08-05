@@ -35,6 +35,45 @@ func find(t *testing.T, api *API, group, name string) *Operation {
 	return nil
 }
 
+func TestResponsesListsEveryStatusIncludingThoseWithNoBody(t *testing.T) {
+	api := load(t, "dotnet9-minimal.json")
+	get := find(t, api, "orders", "get")
+
+	got := get.Responses()
+	if len(got) != 2 {
+		t.Fatalf("Responses() = %+v, want 2 entries (200 and 404)", got)
+	}
+	if got[0].Status != "200" || got[0].Schema != "Order" {
+		t.Errorf("first response = %+v, want status 200 referencing Order", got[0])
+	}
+	if got[1].Status != "404" || got[1].Schema != "" || got[1].Type != "" {
+		t.Errorf("second response = %+v, want status 404 with no schema", got[1])
+	}
+}
+
+func TestResponsesSortsDefaultLast(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"Sample","version":"1"},"paths":{
+		"/api/widgets":{"get":{"operationId":"listWidgets","responses":{
+			"default":{"description":"error"},
+			"404":{"description":"missing"},
+			"200":{"description":"ok"}}}}}}`
+	api, err := Parse([]byte(spec))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	got := api.Operations[0].Responses()
+	want := []string{"200", "404", "default"}
+	if len(got) != len(want) {
+		t.Fatalf("Responses() = %+v, want %d entries", got, len(want))
+	}
+	for i, status := range want {
+		if got[i].Status != status {
+			t.Errorf("Responses()[%d].Status = %q, want %q", i, got[i].Status, status)
+		}
+	}
+}
+
 func names(api *API) []string {
 	out := make([]string, 0, len(api.Operations))
 	for _, op := range api.Operations {

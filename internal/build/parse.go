@@ -77,17 +77,18 @@ func Parse(data []byte) (*API, error) {
 			}
 
 			op := &Operation{
-				ID:          specOp.OperationID,
-				Group:       group,
-				Method:      method,
-				Path:        p,
-				Summary:     specOp.Summary,
-				Description: specOp.Description,
-				Deprecated:  specOp.Deprecated,
-				Params:      params(item.Parameters, specOp.Parameters),
-				Body:        requestBody(specOp.RequestBody),
-				Source:      SourceSpec,
-				responses:   responseSchemas(specOp.Responses),
+				ID:           specOp.OperationID,
+				Group:        group,
+				Method:       method,
+				Path:         p,
+				Summary:      specOp.Summary,
+				Description:  specOp.Description,
+				Deprecated:   specOp.Deprecated,
+				Params:       params(item.Parameters, specOp.Parameters),
+				Body:         requestBody(specOp.RequestBody),
+				Source:       SourceSpec,
+				responses:    responseSchemas(specOp.Responses),
+				responseList: responseList(specOp.Responses),
 			}
 
 			base := ""
@@ -342,6 +343,40 @@ func responseSchemas(responses *openapi3.Responses) map[string]*openapi3.SchemaR
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// responseList resolves every documented response for display; unlike responseSchemas, it keeps statuses with no JSON body.
+func responseList(responses *openapi3.Responses) []Response {
+	if responses == nil {
+		return nil
+	}
+	m := responses.Map()
+	statuses := make([]string, 0, len(m))
+	for status := range m {
+		statuses = append(statuses, status)
+	}
+	// A plain sort already puts "default" last: ASCII digits precede letters.
+	sort.Strings(statuses)
+
+	out := make([]Response, 0, len(statuses))
+	for _, status := range statuses {
+		r := Response{Status: status}
+		ref := m[status]
+		if ref != nil && ref.Value != nil {
+			if media := ref.Value.Content.Get(JSONContentType); media != nil && media.Schema != nil {
+				r.Schema = schemaName(media.Schema.Ref)
+				if media.Schema.Value != nil {
+					s := media.Schema.Value
+					r.Type = schemaType(s)
+					if r.Type == TypeArray && s.Items != nil && s.Items.Value != nil {
+						r.ItemType = schemaType(s.Items.Value)
+					}
+				}
+			}
+		}
+		out = append(out, r)
 	}
 	return out
 }
