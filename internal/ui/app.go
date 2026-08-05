@@ -198,13 +198,24 @@ func (m Model) bulleted(line string) string {
 // wrapped folds text at the screen edge. The renderer truncates anything wider,
 // and the ledger explaining a failed discovery is the longest line blip draws.
 func (m Model) wrapped() lipgloss.Style {
+	return wrapped(m.theme, m.width)
+}
+
+func (m Model) styled(c lipgloss.Color) lipgloss.Style {
+	return styled(m.theme, m.width, c)
+}
+
+// wrapped folds text at the screen edge. The renderer truncates anything wider,
+// so every state in this package that draws free text goes through this rather
+// than a bare lipgloss.NewStyle().
+func wrapped(_ theme.Theme, width int) lipgloss.Style {
 	s := lipgloss.NewStyle()
-	if m.width > 0 {
-		s = s.Width(m.width)
+	if width > 0 {
+		s = s.Width(width)
 	}
 	return s
 }
 
-func (m Model) styled(c lipgloss.Color) lipgloss.Style {
-	return m.wrapped().Foreground(c)
+func styled(t theme.Theme, width int, c lipgloss.Color) lipgloss.Style {
+	return wrapped(t, width).Foreground(c)
 }
