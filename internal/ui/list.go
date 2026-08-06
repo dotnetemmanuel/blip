@@ -358,6 +358,32 @@ func (m *listModel) enterSearch() {
 	m.cursor = m.firstOpIndex()
 }
 
+// commitSearch closes the search box keeping whatever the query led the cursor
+// to, which is the opposite of exitSearch: having found the operation you were
+// looking for, landing back on the one you started from would throw the search
+// away silently.
+func (m *listModel) commitSearch() {
+	if !m.searching {
+		return
+	}
+	found := m.Selected()
+	m.searching = false
+	m.query = ""
+	if found != nil {
+		// A query reaches inside a folded group, so the fold has to give way or
+		// the row the cursor is on would not exist to come back to.
+		delete(m.folded, found.Group)
+	}
+	m.rebuild()
+	if found != nil {
+		if i, ok := m.indexOfOp(found); ok {
+			m.cursor = i
+			return
+		}
+	}
+	m.cursor = m.firstOpIndex()
+}
+
 // exitSearch drops the query and restores the selection that was live when
 // search was entered, if it is still around to restore.
 func (m *listModel) exitSearch() {

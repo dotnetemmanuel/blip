@@ -483,3 +483,204 @@ func TestBrowsingScreenWhileSearchingStillFitsTheHeight(t *testing.T) {
 		t.Errorf("View() is %d lines tall on a %d line screen while searching:\n%s", got, height, m.View())
 	}
 }
+
+// browsingModel starts on the first operation of the sample spec, so enter has
+// something to fill in.
+func TestEnterOpensTheFillPaneForTheSelectedOperation(t *testing.T) {
+	m := browsingModel(t)
+	if m.list.Selected() == nil {
+		t.Fatal("test setup: nothing is selected")
+	}
+
+	next, _ := m.Update(enterKey)
+	m = next.(Model)
+
+	if m.pane != stateFill {
+		t.Fatalf("pane = %q, want the fill pane open", m.pane)
+	}
+	if m.form.op != m.list.Selected() {
+		t.Error("the fill pane was opened on a different operation than the one selected")
+	}
+}
+
+// A group header is selectable, which is what n means, but there is nothing
+// behind it to send.
+func TestEnterOnAGroupHeaderOpensNothing(t *testing.T) {
+	m := browsingModel(t)
+	next, _ := m.Update(nKey)
+	m = next.(Model)
+	if m.list.Selected() != nil {
+		t.Fatal("test setup: n did not land on a group header")
+	}
+
+	next, _ = m.Update(enterKey)
+	m = next.(Model)
+
+	if m.pane == stateFill {
+		t.Error("enter on a group header opened the fill pane with no operation behind it")
+	}
+}
+
+func TestEscClosesTheFillPane(t *testing.T) {
+	m := browsingModel(t)
+	next, _ := m.Update(enterKey)
+	m = next.(Model)
+
+	next, _ = m.Update(esc)
+	m = next.(Model)
+
+	if m.pane == stateFill {
+		t.Error("esc left the fill pane open")
+	}
+}
+
+// C, ruled by the human, and the same rule the search box gets: while a field is
+// taking text, q types a letter.
+func TestQTypesIntoAFormFieldInsteadOfQuitting(t *testing.T) {
+	m := fillableModel(t)
+	next, _ := m.Update(enterKey) // opens the fill pane
+	m = next.(Model)
+	next, _ = m.Update(enterKey) // starts editing the first field
+	m = next.(Model)
+	if !m.form.Editing() {
+		t.Fatal("test setup: the first field did not start taking text")
+	}
+
+	next, cmd := m.Update(rune1('q'))
+	m = next.(Model)
+
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("q quit the program while a field was taking text; it should have typed a letter")
+		}
+	}
+	if !strings.Contains(strings.Join(valuesOf(m.form), ""), "q") {
+		t.Errorf("form values = %v, want q typed into the focused field", m.form.Values())
+	}
+}
+
+// fillableSpec declares its parameters, which sampleSpec deliberately does not,
+// so the fill pane has something to put a cursor on.
+const fillableSpec = `{"openapi":"3.0.1","info":{"title":"Fillable","version":"1"},"paths":{
+	"/api/things/{id}":{"get":{"tags":["Things"],"operationId":"getThing",
+	 "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],
+	 "responses":{"200":{"description":"OK"}}}}}}`
+
+func fillableModel(t *testing.T) Model {
+	t.Helper()
+	m := New(context.Background(), Options{})
+	m.list.SetAPI(mustParse(t, fillableSpec))
+	m.mode = modeBrowsing
+	m.targets = []detect.Target{{Title: "fillable"}}
+	m.detail.SetOperation(m.list.Selected())
+	return m
+}
+
+func valuesOf(m formModel) []string {
+	out := make([]string, 0, len(m.fields))
+	for _, f := range m.fields {
+		out = append(out, f.value)
+	}
+	return out
+}
+
+// The pane swap must not change how tall the screen draws.
+func TestBrowsingScreenWithTheFillPaneStillFitsTheHeight(t *testing.T) {
+	const height = 20
+	m := browsingModelSized(t, 30, 80, height)
+
+	next, _ := m.Update(enterKey)
+	m = next.(Model)
+	if m.pane != stateFill {
+		t.Fatal("test setup: enter did not open the fill pane")
+	}
+
+	if got := lipgloss.Height(m.View()); got > height {
+		t.Errorf("View() is %d lines tall on a %d line screen with the fill pane open:\n%s", got, height, m.View())
+	}
+}
+
+// An operation with nothing to fill in must not be offered keys that do nothing.
+func TestFillFooterDoesNotOfferEditingWithNoFields(t *testing.T) {
+	m := browsingModel(t)
+	next, _ := m.Update(enterKey)
+	m = next.(Model)
+	if len(m.form.fields) != 0 {
+		t.Fatal("test setup: the sample operation declares no parameters, so the form should be empty")
+	}
+
+	if got := m.footer(); strings.Contains(got, "enter edit") {
+		t.Errorf("footer = %q, want it not to offer editing when there is nothing to edit", got)
+	}
+}
+
+// Search is the fast way to reach an operation in a large API, so enter has to
+// be a way through it rather than a dead end that quietly picks something else.
+func TestEnterFromSearchOpensTheOperationTheSearchFound(t *testing.T) {
+	m := browsingModel(t)
+	next, _ := m.Update(slash)
+	m = next.(Model)
+	next, _ = m.Update(runes("beta/"))
+	m = next.(Model)
+
+	found := m.list.Selected()
+	if found == nil || found.FullName() != "getBeta" {
+		t.Fatalf("test setup: search selected %v, want getBeta", found)
+	}
+
+	next, _ = m.Update(enterKey)
+	m = next.(Model)
+
+	if m.pane != stateFill {
+		t.Fatal("enter while searching opened nothing")
+	}
+	if m.form.op != found {
+		t.Errorf("the fill pane opened on %v, want the operation the search found", m.form.op)
+	}
+	if m.list.searching {
+		t.Error("the search box is still open behind the fill pane")
+	}
+	if got := m.list.Selected(); got != found {
+		t.Errorf("the list selection fell back to %v, want it to stay on the operation just picked", got)
+	}
+}
+
+// A query reaches inside a folded group, so committing it has to unfold, or the
+// row the cursor was on stops existing and the selection falls somewhere else.
+func TestEnterFromSearchInsideAFoldedGroupKeepsEverythingInStep(t *testing.T) {
+	m := browsingModel(t)
+	next, _ := m.Update(nKey) // onto the beta header
+	m = next.(Model)
+	next, _ = m.Update(tab) // fold beta
+	m = next.(Model)
+	if !m.list.folded["beta"] {
+		t.Fatal("test setup: tab did not fold the beta group")
+	}
+
+	next, _ = m.Update(slash)
+	m = next.(Model)
+	next, _ = m.Update(runes("beta/"))
+	m = next.(Model)
+	found := m.list.Selected()
+	if found == nil || found.FullName() != "getBeta" {
+		t.Fatalf("test setup: search inside a folded group selected %v, want getBeta", found)
+	}
+
+	next, _ = m.Update(enterKey)
+	m = next.(Model)
+
+	if got := m.list.Selected(); got != found {
+		t.Errorf("the list selection is %v, want the operation the search found", got)
+	}
+	if !strings.Contains(m.detail.View(), found.Path) {
+		t.Errorf("the detail pane describes something else:\n%s", m.detail.View())
+	}
+
+	// Closing the form must not leave the highlighted row and the pane beside it
+	// describing two different operations.
+	next, _ = m.Update(esc)
+	m = next.(Model)
+	if got := m.list.Selected(); got != found || !strings.Contains(m.detail.View(), found.Path) {
+		t.Errorf("after esc the list is on %v and the pane shows:\n%s", got, m.detail.View())
+	}
+}

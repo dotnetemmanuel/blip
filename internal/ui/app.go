@@ -113,8 +113,13 @@ type Model struct {
 	warnings  []string
 	loadNotes []string
 
+	// pane is which of Read and Fill the right-hand side is showing. Its zero
+	// value is not stateRead, so every test that builds a Model by hand rather
+	// than through New lands on Read via the default arm of viewBrowsing.
+	pane   paneState
 	list   listModel
 	detail detailModel
+	form   formModel
 }
 
 var _ tea.Model = Model{}
@@ -131,8 +136,10 @@ func New(ctx context.Context, opts Options) Model {
 		discover:    opts.Discover,
 		loadAPI:     opts.LoadAPI,
 		discovering: opts.Discover != nil,
+		pane:        stateRead,
 		list:        newListModel(opts.Theme),
 		detail:      newDetailModel(opts.Theme),
+		form:        newFormModel(opts.Theme),
 	}
 }
 

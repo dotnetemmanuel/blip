@@ -44,6 +44,12 @@ consumer is a coding agent that needs to call a backend while debugging; humans 
   copy in either. A spec parameter typed `integer` or `number` registers as a *string* flag
   for this reason: pflag reads a leading zero as octal, so `--page=010` used to send 8, which
   the pattern .NET emits alongside that parameter calls malformed rather than eight.
+- **The explorer types a body field from the schema; `--field` does not.** `ui` sends
+  `{"qty":3}` for a field the spec calls an integer, because the row draws the word
+  "integer" beside the box. `--field qty=3` still sends `{"qty":"3"}` and `key:=value`
+  remains the only way to type it there, because a command line shows no such label and
+  guessing would be guessing. The asymmetry is deliberate and pinned by
+  `TestFormTypesABodyFieldFromTheSchemaUnlikeTheCommandLine`.
 - **A credential only reaches the hosts its profile pins.** `hosts` in credentials.toml is
   the only trusted statement of where a secret may go, because .blip.toml is committed and
   may come from a cloned repo. Unpinned reaches loopback only. The spec fetch additionally

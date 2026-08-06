@@ -58,20 +58,54 @@ func (m *Model) updateChoosing(msg tea.KeyMsg) tea.Cmd {
 }
 
 // updateBrowsing forwards the key to the list, then keeps the detail pane in
-// step with whatever it now has selected, nil included.
+// step with whatever it now has selected, nil included. Once the Fill pane is
+// open it owns the keyboard, so that arrow keys move between fields rather than
+// moving the selection out from under the form.
 func (m *Model) updateBrowsing(msg tea.KeyMsg) tea.Cmd {
+	if m.pane == stateFill {
+		return m.updateFilling(msg)
+	}
+
+	// Enter picks what the cursor rests on, search box open or not: searching is
+	// the fast way to reach an operation, so it has to be a way through rather
+	// than a dead end. A header row has no operation behind it to pick.
+	if msg.String() == "enter" {
+		if op := m.list.Selected(); op != nil {
+			m.list.commitSearch()
+			m.pane = stateFill
+			m.form.SetOperation(op)
+			m.applyLayout()
+			return nil
+		}
+	}
+
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	m.detail.SetOperation(m.list.Selected())
 	return cmd
 }
 
+// updateFilling gives the key to the form, except for the esc that closes it.
+// esc while a field is taking text belongs to the field, which uses it to stop
+// editing rather than to throw the whole form away.
+func (m *Model) updateFilling(msg tea.KeyMsg) tea.Cmd {
+	if msg.Type == tea.KeyEsc && !m.form.Editing() {
+		m.pane = stateRead
+		return nil
+	}
+	var cmd tea.Cmd
+	m.form, cmd = m.form.Update(msg)
+	return cmd
+}
+
 // textEntryActive reports whether the focused pane is reading free text right
 // now, so that a plain "q" types a letter there instead of quitting. Only
-// ctrl+c is guaranteed to quit unconditionally. Task 12's Fill pane will add
-// another case here.
+// ctrl+c is guaranteed to quit unconditionally.
 func (m Model) textEntryActive() bool {
-	return m.mode == modeBrowsing && m.list.searching
+	if m.mode != modeBrowsing {
+		return false
+	}
+	return m.list.searching || (m.pane == stateFill && m.form.Editing())
 }
 
 // applyLayout splits the screen between the list and the detail pane, and
@@ -83,9 +117,11 @@ func (m *Model) applyLayout() {
 	left, right := splitWidths(m.width)
 	m.list.SetWidth(left)
 	m.detail.SetWidth(right)
+	m.form.SetWidth(right)
 	h := m.contentHeight()
 	m.list.SetHeight(h)
 	m.detail.SetHeight(h)
+	m.form.SetHeight(h)
 }
 
 // contentHeight is how many rows the panes can show once the chrome around
@@ -139,15 +175,31 @@ func wrapIndex(i, n int) int {
 	return ((i % n) + n) % n
 }
 
+// keys joins the hints a footer offers. Two spaces alone left "tab fold" and
+// "/ search" reading as one instruction at a glance.
+func keys(hints ...string) string {
+	return strings.Join(hints, " · ")
+}
+
 // footer names the keys the current mode responds to.
 func (m Model) footer() string {
 	switch m.mode {
 	case modeChoosing:
-		return "up/down choose  enter select  q quit"
+		return keys("up/down choose", "enter select", "q quit")
 	case modeBrowsing:
-		return "up/down move  n/N group  tab fold  / search  q quit"
+		if m.pane == stateFill {
+			switch {
+			case m.form.Editing():
+				return keys("type to fill in", "esc done")
+			case len(m.form.fields) == 0:
+				return keys("nothing to fill in", "esc back", "q quit")
+			default:
+				return keys("up/down field", "enter edit", "left/right choose", "esc back", "q quit")
+			}
+		}
+		return keys("up/down move", "n/N group", "tab fold", "/ search", "enter fill in", "q quit")
 	default:
-		return "q quit"
+		return keys("q quit")
 	}
 }
 
@@ -168,7 +220,11 @@ func (m Model) viewChoosing() string {
 // viewBrowsing lays the list and the detail pane side by side, each already
 // wrapped to the width applyLayout gave it, with any banner above them.
 func (m Model) viewBrowsing() string {
-	panes := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), " ", m.detail.View())
+	right := m.detail.View()
+	if m.pane == stateFill {
+		right = m.form.View()
+	}
+	panes := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), " ", right)
 	if banner := m.browsingBanner(); banner != "" {
 		return banner + "\n" + panes
 	}
