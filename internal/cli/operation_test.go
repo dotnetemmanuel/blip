@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/dotnetemmanuel/blip/internal/output"
+	"github.com/dotnetemmanuel/blip/internal/request"
 )
 
 // specServing writes a spec to a temp file and serves it, so a test can pin
@@ -211,6 +214,8 @@ func TestPathArgumentCannotEscapeTheOperationPath(t *testing.T) {
 		// A climb is refused outright: encoding it and hoping the server agrees
 		// is not a guarantee, since servers differ on whether they decode first.
 		{name: "traversal", arg: "../../admin/secrets", refused: true},
+		// An empty segment collapses the path onto a different route.
+		{name: "empty", arg: "", refused: true},
 		{name: "embedded slash", arg: "a/b", want: "/api/things/a%2Fb"},
 		{name: "ordinary id", arg: "7f00-0101", want: "/api/things/7f00-0101"},
 		{name: "dots inside a segment are fine", arg: "a..b", want: "/api/things/a..b"},
@@ -277,5 +282,183 @@ func TestMissingRequiredHeadersAreReportedInSpecOrder(t *testing.T) {
 	}
 	if !strings.Contains(want, "--header-x-alpha, --header-x-bravo, --header-x-charlie, --header-x-delta") {
 		t.Errorf("stderr = %q, want the headers in spec order", want)
+	}
+}
+
+// The explorer normalises a typed value through request.NormalizeScalar; the CLI
+// normalises it through pflag. This pins the two to the same answer, so the same
+// value typed into either surface reaches the server as the same characters.
+func TestTypedParameterMatchesTheExplorersNormalisation(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   string
+		typed string
+	}{
+		{name: "integer with leading zeroes", typ: "integer", typed: "007"},
+		{name: "integer with a sign", typ: "integer", typed: "+5"},
+		{name: "number with a trailing zero", typ: "number", typed: "1.50"},
+		{name: "number as a bare fraction", typ: "number", typed: ".5"},
+		{name: "boolean shorthand", typ: "boolean", typed: "T"},
+		{name: "number in exponent form", typ: "number", typed: "1e2"},
+		// A leading zero used to mean octal here: --page=010 sent 8, which the
+		// spec's own pattern calls malformed rather than eight.
+		{name: "integer with a leading zero", typ: "integer", typed: "010"},
+		{name: "integer with two leading zeroes", typ: "integer", typed: "0090"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := fmt.Sprintf(`{"openapi":"3.0.1","info":{"title":"T","version":"1"},"paths":{
+				"/api/things":{"get":{"tags":["Things"],"operationId":"listThings",
+				 "parameters":[{"name":"v","in":"query","schema":{"type":"%s"}}],
+				 "responses":{"200":{"description":"OK"}}}}}}`, tt.typ)
+
+			srv := specServing(t, spec)
+			f := apiFixture(t, srv, "")
+
+			// One --v=value argument, because a boolean flag takes its value
+			// attached or not at all.
+			got := f.run(t, "things", "list", "--v="+tt.typed)
+			if got.code != output.ExitOK {
+				t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+			}
+
+			want, err := request.NormalizeScalar(tt.typ, tt.typed)
+			if err != nil {
+				t.Fatalf("NormalizeScalar refused %q, which the CLI accepted: %v", tt.typed, err)
+			}
+			sent, _ := url.Parse(srv.last.RequestURI)
+			if got := sent.Query().Get("v"); got != want {
+				t.Errorf("the CLI sent v=%q, the explorer would send v=%q", got, want)
+			}
+		})
+	}
+}
+
+// pflag accepts Inf and NaN for a float flag. Neither is JSON and no server
+// wants either, and the explorer refuses both, so the CLI must too.
+func TestNumberParameterRefusesInfinityAndNaN(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"T","version":"1"},"paths":{
+		"/api/things":{"get":{"tags":["Things"],"operationId":"listThings",
+		 "parameters":[{"name":"v","in":"query","schema":{"type":"number"}}],
+		 "responses":{"200":{"description":"OK"}}}}}}`
+
+	for _, value := range []string{"Inf", "-Inf", "NaN"} {
+		t.Run(value, func(t *testing.T) {
+			srv := specServing(t, spec)
+			f := apiFixture(t, srv, "")
+
+			got := f.run(t, "things", "list", "--v="+value)
+
+			if got.code != output.ExitUsage {
+				t.Errorf("exit = %d, want %d", got.code, output.ExitUsage)
+			}
+			if srv.last.Method != "" {
+				t.Errorf("server saw %s?%s, want nothing sent", srv.last.Path, srv.last.Query)
+			}
+			if _, err := request.NormalizeScalar("number", value); err == nil {
+				t.Errorf("the explorer accepts %q, which the CLI now refuses", value)
+			}
+		})
+	}
+}
+
+// A spec that types a parameter as an integer means a base ten integer, so a
+// value pflag would have read as octal or hex is refused rather than quietly
+// turned into a different number.
+func TestIntegerParameterIsBaseTen(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"T","version":"1"},"paths":{
+		"/api/things":{"get":{"tags":["Things"],"operationId":"listThings",
+		 "parameters":[{"name":"page","in":"query","schema":{"type":"integer"}}],
+		 "responses":{"200":{"description":"OK"}}}}}}`
+
+	tests := []struct {
+		typed   string
+		want    string
+		refused bool
+	}{
+		{typed: "010", want: "page=10"},
+		{typed: "09", want: "page=9"},
+		{typed: "7", want: "page=7"},
+		{typed: "-3", want: "page=-3"},
+		{typed: "0x10", refused: true},
+		{typed: "two", refused: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.typed, func(t *testing.T) {
+			srv := specServing(t, spec)
+			f := apiFixture(t, srv, "")
+
+			got := f.run(t, "things", "list", "--page="+tt.typed)
+
+			if tt.refused {
+				if got.code != output.ExitUsage {
+					t.Errorf("exit = %d, want %d", got.code, output.ExitUsage)
+				}
+				if srv.last.Method != "" {
+					t.Errorf("server saw %s, want nothing sent", srv.last.Query)
+				}
+				return
+			}
+			if got.code != output.ExitOK {
+				t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+			}
+			if srv.last.Query != tt.want {
+				t.Errorf("query = %q, want %q", srv.last.Query, tt.want)
+			}
+		})
+	}
+}
+
+// The list branch normalises each item too, so a repeated flag and the explorer's
+// comma separated box put the same characters on the wire.
+func TestListParameterItemsAreNormalisedToo(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"T","version":"1"},"paths":{
+		"/api/things":{"get":{"tags":["Things"],"operationId":"listThings",
+		 "parameters":[{"name":"n","in":"query","schema":{"type":"array","items":{"type":"integer"}}}],
+		 "responses":{"200":{"description":"OK"}}}}}}`
+	srv := specServing(t, spec)
+	f := apiFixture(t, srv, "")
+
+	got := f.run(t, "things", "list", "--n=010", "--n=7")
+
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	if srv.last.Query != "n=10&n=7" {
+		t.Errorf("query = %q, want n=10&n=7", srv.last.Query)
+	}
+}
+
+// A numeric parameter registers as a string flag so that base ten wins, so help
+// shows "string" and the type it actually wants has to be said in the
+// description or it is stated nowhere at all.
+func TestHelpNamesTheTypeANumericFlagWants(t *testing.T) {
+	spec := `{"openapi":"3.0.1","info":{"title":"T","version":"1"},"paths":{
+		"/api/things":{"get":{"tags":["Things"],"operationId":"listThings",
+		 "parameters":[
+		  {"name":"page","in":"query","schema":{"type":"integer"}},
+		  {"name":"minPrice","in":"query","schema":{"type":"number"}},
+		  {"name":"q","in":"query","schema":{"type":"string"}}],
+		 "responses":{"200":{"description":"OK"}}}}}}`
+	srv := specServing(t, spec)
+	f := apiFixture(t, srv, "")
+
+	got := f.run(t, "things", "list", "--help")
+
+	if got.code != output.ExitOK {
+		t.Fatalf("exit = %d (%s)", got.code, got.stderr)
+	}
+	for _, want := range []string{"--page string", "(integer)", "--minPrice string", "(number)"} {
+		if !strings.Contains(got.stdout, want) {
+			t.Errorf("help is missing %q:\n%s", want, got.stdout)
+		}
+	}
+	// A string parameter already says string, so a note there would be noise.
+	for _, line := range strings.Split(got.stdout, "\n") {
+		if strings.Contains(line, "--q ") && strings.Contains(line, "(string)") {
+			t.Errorf("help labels a string flag redundantly: %q", line)
+		}
 	}
 }

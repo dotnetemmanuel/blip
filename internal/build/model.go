@@ -35,6 +35,20 @@ type Param struct {
 	Default     string   `json:"default,omitempty"`
 }
 
+// AllowsValue reports whether a value is one the parameter accepts. A parameter
+// with no enum accepts anything.
+func (p Param) AllowsValue(value string) bool {
+	if len(p.Enum) == 0 {
+		return true
+	}
+	for _, allowed := range p.Enum {
+		if allowed == value {
+			return true
+		}
+	}
+	return false
+}
+
 // Field is one property of a flat request body.
 type Field struct {
 	Name        string   `json:"name"`

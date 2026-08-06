@@ -37,6 +37,13 @@ consumer is a coding agent that needs to call a backend while debugging; humans 
 - **A spec never owns a blip flag.** `binder.register` moves a parameter aside when it wants
   a name a global or a body flag holds. A spec that could claim `--dry-run` could send the
   mutation the caller was checking.
+- **One request assembler, two front ends.** `request.ForOperation` and `request.MissingFrom`
+  turn an operation plus values into a request for both the CLI and `ui`, and
+  `request.NormalizeScalar` decides what a typed value becomes on the wire for both, list
+  items included, and `request.BuildFields` is the only body encoder. Do not grow a second
+  copy in either. A spec parameter typed `integer` or `number` registers as a *string* flag
+  for this reason: pflag reads a leading zero as octal, so `--page=010` used to send 8, which
+  the pattern .NET emits alongside that parameter calls malformed rather than eight.
 - **A credential only reaches the hosts its profile pins.** `hosts` in credentials.toml is
   the only trusted statement of where a secret may go, because .blip.toml is committed and
   may come from a cloned repo. Unpinned reaches loopback only. The spec fetch additionally

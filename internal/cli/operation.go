@@ -206,6 +206,11 @@ func usageFor(p build.Param, flagName, preferred string) string {
 	if usage == "" {
 		usage = p.In + " parameter"
 	}
+	// A number registers as a string flag so that base ten wins, so the type it
+	// actually wants has to be said here or help would not carry it anywhere.
+	if p.Type == build.TypeInteger || p.Type == build.TypeNumber {
+		usage += " (" + p.Type + ")"
+	}
 	if len(p.Enum) > 0 {
 		usage += " (one of: " + strings.Join(p.Enum, ", ") + ")"
 	}
@@ -218,12 +223,13 @@ func usageFor(p build.Param, flagName, preferred string) string {
 	return usage
 }
 
+// registerFlag gives a parameter a flag of the right shape. A number takes a
+// string rather than pflag's own numeric flag, because pflag reads a leading zero
+// as octal: --page=010 would send 8, and a spec that types a parameter as an
+// integer means a base ten integer. Booleans keep their own flag so that a bare
+// --archived still works.
 func registerFlag(flags *pflag.FlagSet, name string, p build.Param, usage string) {
 	switch p.Type {
-	case build.TypeInteger:
-		flags.Int64(name, defaultInt(p.Default), usage)
-	case build.TypeNumber:
-		flags.Float64(name, defaultFloat(p.Default), usage)
 	case build.TypeBoolean:
 		flags.Bool(name, p.Default == "true", usage)
 	case build.TypeArray:
@@ -233,109 +239,88 @@ func registerFlag(flags *pflag.FlagSet, name string, p build.Param, usage string
 	}
 }
 
-func defaultInt(s string) int64 {
-	v, _ := strconv.ParseInt(s, 10, 64)
-	return v
-}
-
-func defaultFloat(s string) float64 {
-	v, _ := strconv.ParseFloat(s, 64)
-	return v
-}
-
 func (b *binder) bind(rt *Runtime, flags *pflag.FlagSet, args []string) (*request.Request, error) {
-	req := &request.Request{
-		Method: b.op.Method,
+	values := request.OperationValues{
+		Path:   args,
 		Query:  url.Values{},
 		Header: http.Header{},
 	}
 
-	path := b.op.Path
-	for i, p := range b.op.PathParams() {
-		path = strings.Replace(path, "{"+p.Name+"}", url.PathEscape(args[i]), 1)
-	}
-	req.Path = path
-
-	var missing []string
 	// Both loops walk the parameters in spec order, never a map, so the message
 	// a caller sees is the same on every run.
 	for _, p := range b.op.ParamsIn(build.InQuery) {
-		values, err := flagValues(flags, b.flag(p), p)
+		vs, err := flagValues(flags, b.flag(p), p)
 		if err != nil {
 			return nil, err
 		}
-		if len(values) == 0 {
-			if p.Required {
-				missing = append(missing, "--"+b.flag(p))
-			}
-			continue
-		}
-		for _, v := range values {
-			req.Query.Add(p.Name, v)
+		for _, v := range vs {
+			values.Query.Add(p.Name, v)
 		}
 	}
-
 	for _, p := range b.op.ParamsIn(build.InHeader) {
-		values, err := flagValues(flags, b.flag(p), p)
+		vs, err := flagValues(flags, b.flag(p), p)
 		if err != nil {
 			return nil, err
 		}
-		if len(values) == 0 {
-			if p.Required {
-				missing = append(missing, "--"+b.flag(p))
-			}
-			continue
+		for _, v := range vs {
+			values.Header.Add(p.Name, v)
 		}
-		for _, v := range values {
-			req.Header.Add(p.Name, v)
-		}
-	}
-
-	if len(missing) > 0 {
-		return nil, usageError("%s is missing required parameters: %s",
-			b.op.FullName(), strings.Join(missing, ", "))
 	}
 
 	if b.op.Source == build.SourceRoute {
-		if err := b.applyOpenFlags(req); err != nil {
+		if err := b.applyOpenFlags(&values); err != nil {
 			return nil, err
 		}
+	}
+
+	// Parameters are settled before the body, so a forgotten flag is not hidden
+	// behind a --data file that does not exist.
+	missing := request.MissingFrom(b.op, values)
+	if len(missing.Params) > 0 {
+		return nil, b.missingError(missing.Params)
+	}
+
+	if b.op.Body != nil || b.op.Source == build.SourceRoute {
 		body, err := rt.body(b.data, b.fields)
 		if err != nil {
 			return nil, err
 		}
-		req.Body = body
-		return req, nil
+		values.Body = body
+	}
+	if missing.Body && len(values.Body) == 0 {
+		return nil, usageError("%s requires a body: pass --data @file.json, --data @- or %s",
+			b.op.FullName(), fieldHint(b.op.Body))
 	}
 
-	if b.op.Body != nil {
-		body, err := rt.body(b.data, b.fields)
-		if err != nil {
-			return nil, err
-		}
-		if len(body) == 0 && b.op.Body.Required {
-			return nil, usageError("%s requires a body: pass --data @file.json, --data @- or %s",
-				b.op.FullName(), fieldHint(b.op.Body))
-		}
-		req.Body = body
-		if b.op.Body.ContentType != "" && len(body) > 0 {
-			req.Header.Set("Content-Type", b.op.Body.ContentType)
-		}
-	}
+	return request.ForOperation(b.op, values)
+}
 
-	return req, nil
+// missingError names each missing parameter the way the caller would have
+// reached it: a path parameter is a positional argument, everything else is the
+// flag it registered under.
+func (b *binder) missingError(params []build.Param) error {
+	names := make([]string, 0, len(params))
+	for _, p := range params {
+		if p.In == build.InPath {
+			names = append(names, "<"+p.Name+">")
+			continue
+		}
+		names = append(names, "--"+b.flag(p))
+	}
+	return usageError("%s is missing required parameters: %s",
+		b.op.FullName(), strings.Join(names, ", "))
 }
 
 // applyOpenFlags binds the --query and --header flags a declared route carries,
 // using the same parsing raw uses so the two cannot drift apart.
-func (b *binder) applyOpenFlags(req *request.Request) error {
+func (b *binder) applyOpenFlags(values *request.OperationValues) error {
 	query, err := request.ParseQuery(b.queries)
 	if err != nil {
 		return err
 	}
-	for name, values := range query {
-		for _, v := range values {
-			req.Query.Add(name, v)
+	for name, vs := range query {
+		for _, v := range vs {
+			values.Query.Add(name, v)
 		}
 	}
 
@@ -343,9 +328,9 @@ func (b *binder) applyOpenFlags(req *request.Request) error {
 	if err != nil {
 		return err
 	}
-	for name, values := range header {
-		for _, v := range values {
-			req.Header.Add(name, v)
+	for name, vs := range header {
+		for _, v := range vs {
+			values.Header.Add(name, v)
 		}
 	}
 	return nil
@@ -371,18 +356,6 @@ func flagValues(flags *pflag.FlagSet, name string, p build.Param) ([]string, err
 	}
 
 	switch p.Type {
-	case build.TypeInteger:
-		v, err := flags.GetInt64(name)
-		if err != nil {
-			return nil, usageError("--%s: %v", name, err)
-		}
-		return []string{strconv.FormatInt(v, 10)}, nil
-	case build.TypeNumber:
-		v, err := flags.GetFloat64(name)
-		if err != nil {
-			return nil, usageError("--%s: %v", name, err)
-		}
-		return []string{strconv.FormatFloat(v, 'g', -1, 64)}, nil
 	case build.TypeBoolean:
 		v, err := flags.GetBool(name)
 		if err != nil {
@@ -390,30 +363,33 @@ func flagValues(flags *pflag.FlagSet, name string, p build.Param) ([]string, err
 		}
 		return []string{strconv.FormatBool(v)}, nil
 	case build.TypeArray:
-		v, err := flags.GetStringArray(name)
+		vs, err := flags.GetStringArray(name)
 		if err != nil {
 			return nil, usageError("--%s: %v", name, err)
 		}
-		return v, nil
+		out := make([]string, 0, len(vs))
+		for _, v := range vs {
+			item, err := request.NormalizeScalar(p.ItemType, v)
+			if err != nil {
+				return nil, usageError("--%s %v", name, err)
+			}
+			out = append(out, item)
+		}
+		return out, nil
 	default:
 		v, err := flags.GetString(name)
 		if err != nil {
 			return nil, usageError("--%s: %v", name, err)
 		}
-		if len(p.Enum) > 0 && !contains(p.Enum, v) {
+		if !p.AllowsValue(v) {
 			return nil, usageError("--%s=%q is not one of: %s", name, v, strings.Join(p.Enum, ", "))
 		}
-		return []string{v}, nil
-	}
-}
-
-func contains(values []string, want string) bool {
-	for _, v := range values {
-		if v == want {
-			return true
+		normalized, err := request.NormalizeScalar(p.Type, v)
+		if err != nil {
+			return nil, usageError("--%s %v", name, err)
 		}
+		return []string{normalized}, nil
 	}
-	return false
 }
 
 func use(name string, pathParams []build.Param) string {
