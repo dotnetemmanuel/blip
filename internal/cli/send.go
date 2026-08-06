@@ -56,7 +56,11 @@ func (rt *Runtime) send(ctx context.Context, req *request.Request, op *build.Ope
 		return err
 	}
 
-	if err := rt.checkHostPin(auth, httpReq.URL.Host); err != nil {
+	profile, err := rt.ProfileName()
+	if err != nil {
+		return err
+	}
+	if err := rt.checkHostPin(auth, httpReq.URL.Host, profile); err != nil {
 		return err
 	}
 	if err := auth.Apply(ctx, httpReq); err != nil {
@@ -133,10 +137,9 @@ func (rt *Runtime) validate(op *build.Operation, status int, body []byte) error 
 // checkHostPin refuses to send a credential somewhere its profile does not name.
 // .blip.toml is committed and can come from a repo you merely cloned, so it must
 // not be able to choose both the destination and which secret goes there.
-func (rt *Runtime) checkHostPin(a auth.Authenticator, host string) error {
-	profile, err := rt.ProfileName()
-	if err != nil || profile == "" {
-		return err
+func (rt *Runtime) checkHostPin(a auth.Authenticator, host, profile string) error {
+	if profile == "" {
+		return nil
 	}
 	bare := hostOf("//" + host)
 	if !a.Pinned() {

@@ -238,16 +238,28 @@ func (rt *Runtime) ProfileName() (string, error) {
 // to be sent, so a vault is never consulted for --help or describe.
 func (rt *Runtime) Authenticator(ctx context.Context) (auth.Authenticator, error) {
 	rt.authOnce.Do(func() {
-		rt.auth, rt.authErr = rt.buildAuthenticator(ctx)
+		profile, err := rt.ProfileName()
+		if err != nil {
+			rt.authErr = err
+			return
+		}
+		rt.auth, rt.authErr = rt.buildAuthenticator(ctx, profile)
 	})
 	return rt.auth, rt.authErr
 }
 
-func (rt *Runtime) buildAuthenticator(ctx context.Context) (auth.Authenticator, error) {
-	profile, err := rt.ProfileName()
-	if err != nil {
-		return nil, err
-	}
+// buildAuthenticator takes the profile rather than reading it, because the
+// explorer picks its own target and that target may carry a different profile
+// from the one .blip.toml resolves for the rest of the invocation, or none.
+func (rt *Runtime) buildAuthenticator(ctx context.Context, profile string) (auth.Authenticator, error) {
+	return rt.buildAuthenticatorWith(ctx, profile, rt.interactiveStdin())
+}
+
+// buildAuthenticatorWith takes the reader a credential command may prompt on.
+// The explorer passes nil: bubbletea owns the screen and the keyboard, so a
+// pinentry or a vault unlock would write a prompt nobody can see and read keys
+// meant for the explorer. Refusing with a message beats hanging with none.
+func (rt *Runtime) buildAuthenticatorWith(ctx context.Context, profile string, prompt *os.File) (auth.Authenticator, error) {
 	if profile == "" {
 		return auth.None(), nil
 	}
@@ -262,14 +274,20 @@ func (rt *Runtime) buildAuthenticator(ctx context.Context) (auth.Authenticator, 
 		return nil, err
 	}
 
-	resolved, err := store.Resolve(ctx, profile, creds.NewResolver(rt.interactiveStdin(), rt.stderrFile()))
+	resolved, err := store.Resolve(ctx, profile, creds.NewResolver(prompt, rt.stderrFile()))
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := rt.tokenClient(resolved.TokenURL)
-	if err != nil {
-		return nil, err
+	// Only oauth2_cc needs a client, to reach its identity provider. Building one
+	// for a bearer profile would reach for the environment, which a target the
+	// explorer discovered by probing does not have.
+	var client *http.Client
+	if resolved.Kind == creds.KindOAuth2CC {
+		client, err = rt.tokenClient(resolved.TokenURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return auth.New(resolved, client)
 }

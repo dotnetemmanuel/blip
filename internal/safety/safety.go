@@ -32,8 +32,27 @@ func isSafe(method string) bool {
 	return false
 }
 
+// IsMutation reports whether a method changes something. A caller that draws its
+// own confirmation asks this rather than keeping a second list of verbs, because
+// a verb missing from one list would be confirmed on one surface and sent
+// silently on the other.
+func IsMutation(method string) bool {
+	return !isSafe(method)
+}
+
 func blocked(format string, args ...any) error {
 	return output.Blockedf(format, args...)
+}
+
+// Permitted applies the one rule nothing overrides: a readonly environment
+// refuses a mutation outright. A caller that draws its own confirmation asks this
+// first, because readonly is refused rather than offered.
+func (g Gate) Permitted(method, envName string) error {
+	if isSafe(method) || !g.Readonly {
+		return nil
+	}
+	return blocked("environment %q is readonly, so %s is refused; no flag overrides this",
+		envName, strings.ToUpper(method))
 }
 
 // Check runs the rules in order: readonly first, because no flag may override it.
@@ -43,8 +62,8 @@ func (g Gate) Check(method, url, envName string) error {
 		return nil
 	}
 
-	if g.Readonly {
-		return blocked("environment %q is readonly, so %s is refused; no flag overrides this", envName, method)
+	if err := g.Permitted(method, envName); err != nil {
+		return err
 	}
 	// A dry run sends nothing, so confirming it would be theatre. readonly still
 	// applies above: that rule is about what the environment permits at all.
