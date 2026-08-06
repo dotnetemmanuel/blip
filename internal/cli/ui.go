@@ -11,11 +11,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dotnetemmanuel/blip/internal/auth"
 	"github.com/dotnetemmanuel/blip/internal/build"
 	"github.com/dotnetemmanuel/blip/internal/config"
 	"github.com/dotnetemmanuel/blip/internal/detect"
 	"github.com/dotnetemmanuel/blip/internal/output"
 	"github.com/dotnetemmanuel/blip/internal/request"
+	"github.com/dotnetemmanuel/blip/internal/safety"
 	"github.com/dotnetemmanuel/blip/internal/spec"
 	"github.com/dotnetemmanuel/blip/internal/theme"
 	"github.com/dotnetemmanuel/blip/internal/ui"
@@ -50,15 +52,23 @@ func newUICommand(rt *Runtime) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return ui.Run(cmd.Context(), ui.Options{
-				Stdout:      rt.Stdout,
-				Stdin:       rt.uiInput(),
-				StdoutIsTTY: rt.StdoutIsTTY,
-				Theme:       defaultTheme(),
-				Discover:    discoverIn(root),
-				LoadAPI:     loadAPIFor(rt),
-			})
+			return ui.Run(cmd.Context(), uiOptions(rt, root))
 		},
+	}
+}
+
+// uiOptions is everything the explorer is given, built where a test can reach it.
+// A capability that is merely defined and never bound is invisible to every test
+// in the ui package, since those inject their own.
+func uiOptions(rt *Runtime, root string) ui.Options {
+	return ui.Options{
+		Stdout:      rt.Stdout,
+		Stdin:       rt.uiInput(),
+		StdoutIsTTY: rt.StdoutIsTTY,
+		Theme:       defaultTheme(),
+		Discover:    discoverIn(root),
+		LoadAPI:     loadAPIFor(rt),
+		Send:        sendFor(rt),
 	}
 }
 
@@ -170,6 +180,56 @@ func fetchAPI(ctx context.Context, rt *Runtime, target detect.Target) (*build.AP
 	api.LoadNotes = notes
 	api.Stale = s != nil && s.Status == spec.StatusStale
 	return api, nil
+}
+
+// sendFor is ui.Options.Send, the only path from the explorer to the network.
+// Nothing here runs until something is actually sent: the authenticator is
+// resolved on the first send rather than at launch, so browsing never reaches
+// for a vault. The profile comes from the target the explorer chose, which may
+// carry a different one from the rest of the invocation, or none at all when
+// discovery found the API without a config file.
+func sendFor(rt *Runtime) ui.SendFunc {
+	var authenticator auth.Authenticator
+
+	return func(ctx context.Context, env *config.Environment, req *http.Request) (*request.Response, error) {
+		if env == nil || env.BaseURL == nil {
+			return nil, output.Configf("this target has no base URL, so there is nowhere to send the request")
+		}
+		// The gate is asked again here, at the door, rather than trusted from the
+		// keyboard handler that drew the confirmation. readonly is the one rule
+		// nothing overrides, so it holds even if a later caller forgets to ask.
+		if err := (safety.Gate{Readonly: env.Readonly}).Permitted(req.Method, env.Name); err != nil {
+			return nil, err
+		}
+
+		profile := rt.Globals.Profile
+		if profile == "" {
+			profile = env.Auth
+		}
+
+		// Only a success is remembered. Caching the failure would mean a vault
+		// that happened to be locked on the first send makes every later send in
+		// the same session fail too, with no way back except relaunching.
+		if authenticator == nil {
+			resolved, err := rt.buildAuthenticatorWith(ctx, profile, nil)
+			if err != nil {
+				return nil, err
+			}
+			authenticator = resolved
+		}
+		if err := rt.checkHostPin(authenticator, req.URL.Host, profile); err != nil {
+			return nil, err
+		}
+		if err := authenticator.Apply(ctx, req); err != nil {
+			return nil, err
+		}
+
+		client, err := request.NewClient(env, rt.Globals.Timeout)
+		if err != nil {
+			return nil, err
+		}
+		return request.Do(client, req)
+	}
 }
 
 func discoverIn(root string) ui.DiscoverFunc {

@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dotnetemmanuel/blip/internal/build"
+	"github.com/dotnetemmanuel/blip/internal/config"
 	"github.com/dotnetemmanuel/blip/internal/detect"
 	"github.com/dotnetemmanuel/blip/internal/output"
 	"github.com/dotnetemmanuel/blip/internal/theme"
@@ -41,6 +43,11 @@ type Options struct {
 	Theme       theme.Theme
 	Discover    DiscoverFunc
 	LoadAPI     LoadAPIFunc
+
+	// Send is left nil when the command layer has no way to reach the API, in
+	// which case the explorer browses and fills in but refuses to send rather
+	// than failing at the last keystroke.
+	Send SendFunc
 }
 
 // Run starts the explorer. It refuses rather than negotiating when stdout is not
@@ -89,6 +96,7 @@ type Model struct {
 	theme    theme.Theme
 	discover DiscoverFunc
 	loadAPI  LoadAPIFunc
+	send     SendFunc
 
 	width  int
 	height int
@@ -120,6 +128,20 @@ type Model struct {
 	list   listModel
 	detail detailModel
 	form   formModel
+	result resultModel
+
+	// env is the chosen target's environment, which is where the base URL and
+	// the readonly rule come from. A target found as a spec file on disk has
+	// none, so there is nowhere to send.
+	env *config.Environment
+
+	// pending is the request the confirmation is asking about, built before the
+	// question so that what is shown is what would be sent.
+	pending *http.Request
+
+	// sendErr is why the last send did not happen or did not finish. It is shown
+	// in place of a result rather than swallowed.
+	sendErr error
 }
 
 var _ tea.Model = Model{}
@@ -135,11 +157,13 @@ func New(ctx context.Context, opts Options) Model {
 		theme:       opts.Theme,
 		discover:    opts.Discover,
 		loadAPI:     opts.LoadAPI,
+		send:        opts.Send,
 		discovering: opts.Discover != nil,
 		pane:        stateRead,
 		list:        newListModel(opts.Theme),
 		detail:      newDetailModel(opts.Theme),
 		form:        newFormModel(opts.Theme),
+		result:      newResultModel(opts.Theme),
 	}
 }
 
@@ -203,6 +227,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.choiceCursor = 0
 			}
 		}
+	case sentMsg:
+		return m.applySent(msg), nil
 	case loadedMsg:
 		if msg.err != nil {
 			m.mode = modeFailed
@@ -210,6 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = modeBrowsing
+		m.env = m.chosen.Env
 		m.stale = msg.api.Stale
 		m.warnings = msg.api.Warnings
 		m.loadNotes = msg.api.LoadNotes

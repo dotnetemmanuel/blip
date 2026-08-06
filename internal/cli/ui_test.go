@@ -505,3 +505,174 @@ func TestFetchAPIMergesDeclaredRoutesAlongsideASuccessfulSpec(t *testing.T) {
 		t.Errorf("want the reindex route merged alongside the fetched spec, got operations %+v", api.Operations)
 	}
 }
+
+// The ui package's own tests inject their own Discover, LoadAPI and Send, so a
+// capability the command layer forgets to bind is invisible to all of them: the
+// explorer would browse fine and simply never send anything.
+func TestUIOptionsBindEveryCapability(t *testing.T) {
+	rt := &Runtime{Globals: &Globals{}, Dir: t.TempDir()}
+	opts := uiOptions(rt, rt.Dir)
+
+	if opts.Discover == nil {
+		t.Error("Discover is not bound, so the explorer would find nothing")
+	}
+	if opts.LoadAPI == nil {
+		t.Error("LoadAPI is not bound, so no spec would ever load")
+	}
+	if opts.Send == nil {
+		t.Error("Send is not bound, so every send would refuse with no base URL")
+	}
+}
+
+// sendFor is the explorer's only path to the network, and nothing exercised it:
+// every test in the ui package injects its own Send, so the host pin, the
+// profile pick and the readonly gate were reasoned about rather than run.
+// XDG_CONFIG_HOME is redirected so this reads a credentials file the test wrote
+// rather than the one belonging to whoever is running it.
+func TestSendForEnforcesTheGateAndTheHostPin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	local, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := url.Parse("https://api.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	credsDir := filepath.Join(home, "blip")
+	if err := os.MkdirAll(credsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentials := `[unpinned]
+type  = "bearer"
+token = "unpinned-secret"
+
+[elsewhere]
+type  = "bearer"
+token = "elsewhere-secret"
+hosts = ["other.test"]
+`
+	if err := os.WriteFile(filepath.Join(credsDir, "credentials.toml"), []byte(credentials), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A profile only ever reaches the explorer through .blip.toml, so a runtime
+	// with a profile and no config is not a state that can occur. The config is
+	// written for that reason, not because sendFor reads it.
+	newRuntime := func() *Runtime {
+		dir := t.TempDir()
+		blipToml := "name = \"t\"\ndefault_env = \"dev\"\n\n[env.dev]\nbase_url = \"" + srv.URL + "\"\n"
+		if err := os.WriteFile(filepath.Join(dir, ".blip.toml"), []byte(blipToml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return &Runtime{Globals: &Globals{}, Dir: dir, Stderr: &bytes.Buffer{}}
+	}
+	newReq := func(method string, base *url.URL) *http.Request {
+		req, err := http.NewRequest(method, base.String()+"/api/things", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+
+	t.Run("readonly refuses a mutation at the door", func(t *testing.T) {
+		send := sendFor(newRuntime())
+		env := &config.Environment{Name: "locked", BaseURL: local, Readonly: true}
+
+		_, err := send(context.Background(), env, newReq(http.MethodDelete, local))
+
+		if err == nil {
+			t.Fatal("a readonly environment sent a DELETE")
+		}
+		if got := output.ExitCodeFor(err); got != output.ExitBlocked {
+			t.Errorf("exit = %d, want %d", got, output.ExitBlocked)
+		}
+	})
+
+	t.Run("readonly still lets a read through", func(t *testing.T) {
+		send := sendFor(newRuntime())
+		env := &config.Environment{Name: "locked", BaseURL: local, Readonly: true}
+
+		if _, err := send(context.Background(), env, newReq(http.MethodGet, local)); err != nil {
+			t.Errorf("a read was refused in a readonly environment: %v", err)
+		}
+	})
+
+	// .blip.toml is committed and may come from a repo you merely cloned, so it
+	// must not be able to choose both the secret and where the secret goes. An
+	// unpinned profile reaches loopback and nowhere else.
+	t.Run("an unpinned profile cannot reach a remote host", func(t *testing.T) {
+		send := sendFor(newRuntime())
+		env := &config.Environment{Name: "dev", BaseURL: remote, Auth: "unpinned"}
+
+		_, err := send(context.Background(), env, newReq(http.MethodGet, remote))
+
+		if err == nil {
+			t.Fatal("an unpinned profile reached a remote host")
+		}
+		if got := err.Error(); !strings.Contains(got, "hosts") {
+			t.Errorf("error = %q, want the host pin to be what refused it", got)
+		}
+		if got := output.ExitCodeFor(err); got != output.ExitBlocked {
+			t.Errorf("exit = %d, want %d", got, output.ExitBlocked)
+		}
+	})
+
+	t.Run("an unpinned profile still reaches loopback", func(t *testing.T) {
+		send := sendFor(newRuntime())
+		env := &config.Environment{Name: "dev", BaseURL: local, Auth: "unpinned"}
+
+		if _, err := send(context.Background(), env, newReq(http.MethodGet, local)); err != nil {
+			t.Errorf("an unpinned profile was refused loopback: %v", err)
+		}
+	})
+
+	t.Run("a pinned profile cannot reach a host outside its list", func(t *testing.T) {
+		send := sendFor(newRuntime())
+		env := &config.Environment{Name: "dev", BaseURL: remote, Auth: "elsewhere"}
+
+		_, err := send(context.Background(), env, newReq(http.MethodGet, remote))
+
+		if err == nil {
+			t.Fatal("a pinned profile reached a host its list does not name")
+		}
+		if got := err.Error(); !strings.Contains(got, "api.example.test") {
+			t.Errorf("error = %q, want it to name the host it refused", got)
+		}
+		// Without this the test passes on a DNS failure, which means the
+		// credential was applied and the request went out before the network
+		// stopped it. Blocked is the only answer that proves the pin refused it.
+		if got := output.ExitCodeFor(err); got != output.ExitBlocked {
+			t.Errorf("exit = %d, want %d: the pin must refuse it before it is sent", got, output.ExitBlocked)
+		}
+	})
+
+	// --profile is the second way a profile arrives, and it does not need a
+	// config to have come from. A bearer credential needs no environment either,
+	// so a repo where discovery found the API by probing can still send.
+	t.Run("a bearer profile sends in a repo with no config", func(t *testing.T) {
+		rt := &Runtime{Globals: &Globals{Profile: "unpinned"}, Dir: t.TempDir(), Stderr: &bytes.Buffer{}}
+		send := sendFor(rt)
+		env := &config.Environment{Name: "dev", BaseURL: local}
+
+		if _, err := send(context.Background(), env, newReq(http.MethodGet, local)); err != nil {
+			t.Errorf("--profile with no .blip.toml could not send: %v", err)
+		}
+	})
+
+	t.Run("no profile means no credential and no pin to check", func(t *testing.T) {
+		send := sendFor(newRuntime())
+		env := &config.Environment{Name: "dev", BaseURL: local}
+
+		if _, err := send(context.Background(), env, newReq(http.MethodGet, local)); err != nil {
+			t.Errorf("a target discovered without a config could not send: %v", err)
+		}
+	})
+}

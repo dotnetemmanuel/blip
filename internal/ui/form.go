@@ -478,7 +478,11 @@ func (m formModel) View() string {
 	}
 
 	lines, focus := m.lines()
-	return strings.Join(windowAround(lines, focus, m.height), "\n")
+	height := m.height
+	if height <= 0 {
+		height = -1
+	}
+	return strings.Join(windowAround(lines, focus, height), "\n")
 }
 
 // lines renders every row and reports which one the cursor is on, so the window
@@ -569,15 +573,36 @@ func orPlaceholder(value, placeholder string) string {
 // windowAround takes at most height lines, sliding to keep focus inside them.
 // Clamping alone would put a field below the fold out of reach of the cursor.
 func windowAround(lines []string, focus, height int) []string {
-	if height <= 0 || len(lines) <= height {
-		return lines
+	start, end := windowRange(len(lines), focus, height)
+	return lines[start:end]
+}
+
+// windowRange is the same choice expressed as indices, so a caller holding
+// something other than rendered strings can window before paying to render.
+// A height below zero means no limit; zero means nothing fits.
+func windowRange(n, focus, height int) (start, end int) {
+	if height < 0 || n <= height {
+		return 0, n
 	}
-	start := focus - height/2
-	if start > len(lines)-height {
-		start = len(lines) - height
+	if height == 0 {
+		return 0, 0
+	}
+	start = focus - height/2
+	if start > n-height {
+		start = n - height
 	}
 	if start < 0 {
 		start = 0
 	}
-	return lines[start : start+height]
+	return start, start + height
+}
+
+// clamp cuts a block to the pane's height, so a state drawn in place of the form
+// cannot be taller than the form it replaced and push the title off the top.
+func (m formModel) clamp(s string) string {
+	height := m.height
+	if height <= 0 {
+		height = -1
+	}
+	return strings.Join(windowAround(strings.Split(s, "\n"), 0, height), "\n")
 }
