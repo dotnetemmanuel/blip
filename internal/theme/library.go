@@ -25,7 +25,7 @@ var builtinFS embed.FS
 
 // builtinOrder fixes the picker's display order, with the default first. User
 // themes sort after these.
-var builtinOrder = []string{"event-horizon", "retro-82"}
+var builtinOrder = []string{"retro-82", "event-horizon"}
 
 // Library is the ordered set of available themes plus any warnings from files
 // that failed to load.

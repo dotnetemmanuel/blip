@@ -22,10 +22,12 @@ func writeTheme(t *testing.T, dir, file, body string) {
 	}
 }
 
-func TestBuiltinsLoadWithEventHorizonFirst(t *testing.T) {
+// The first builtin is the default the explorer starts in until the picker
+// lands, so this order is a decision rather than an accident.
+func TestBuiltinsLoadWithRetro82First(t *testing.T) {
 	lib := LoadLibrary("")
 	got := names(lib)
-	want := []string{"event-horizon", "retro-82"}
+	want := []string{"retro-82", "event-horizon"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("builtin themes = %v, want %v", got, want)
 	}
@@ -53,10 +55,10 @@ func TestUserThemeReplacesABuiltinInPlace(t *testing.T) {
 
 	lib := LoadLibrary(dir)
 	got := names(lib)
-	if len(got) != 2 || got[0] != "event-horizon" || got[1] != "retro-82" {
+	if len(got) != 2 || got[0] != "retro-82" || got[1] != "event-horizon" {
 		t.Fatalf("themes = %v, want the builtins with retro-82 replaced in place", got)
 	}
-	if lib.Themes[1].Label != "mine" {
+	if lib.Themes[0].Label != "mine" {
 		t.Fatalf("label = %q, want the drop-in to win", lib.Themes[1].Label)
 	}
 }
@@ -67,7 +69,7 @@ func TestUserThemeWithANewNameSortsAfterTheBuiltins(t *testing.T) {
 		`{"name":"aardvark","label":"Aardvark","dark":{"base":"#000000"},"light":{"base":"#ffffff"}}`)
 
 	got := names(LoadLibrary(dir))
-	want := []string{"event-horizon", "retro-82", "aardvark"}
+	want := []string{"retro-82", "event-horizon", "aardvark"}
 	for i := range want {
 		if i >= len(got) || got[i] != want[i] {
 			t.Fatalf("themes = %v, want %v", got, want)
